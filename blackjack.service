@@ -1,0 +1,37 @@
+[Unit]
+Description=Coin-op blackjack arcade machine
+# Wait for the filesystem holding state/bank.json: the machine must never come
+# up and start taking coins before it can read what it already owes.
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+# gpiozero needs gpio; SDL's KMSDRM backend needs video/render and input.
+SupplementaryGroups=gpio video render input
+
+WorkingDirectory=/home/pi/blackjack
+ExecStart=/home/pi/blackjack/.venv/bin/python /home/pi/blackjack/main.py --real --fullscreen
+
+# Render straight to the framebuffer -- there is no X server on the cabinet.
+Environment=SDL_VIDEODRIVER=kmsdrm
+Environment=SDL_AUDIODRIVER=dummy
+Environment=PYTHONUNBUFFERED=1
+
+# A crash must not strand a player's quarters. Restarting re-runs
+# Bank.reconcile(), which resumes any interrupted payout.
+Restart=always
+RestartSec=3
+
+# SIGINT gives the main loop's `finally` a chance to de-energize the solenoid
+# and release the pins before anything is killed.
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

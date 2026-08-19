@@ -1,0 +1,7 @@
+# PC (mock mode): pygame only. `pygame` also works in place of pygame-ce.
+pygame-ce>=2.5
+
+# Raspberry Pi only -- do NOT install on a PC, it is imported lazily inside
+# hardware/real.py precisely so the PC build never needs it.
+#   gpiozero>=2.0
+#   lgpio>=0.2

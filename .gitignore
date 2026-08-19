@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+
+# The machine's money. Never commit it; back it up separately.
+state/
