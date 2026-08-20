@@ -34,6 +34,7 @@ from dataclasses import dataclass
 import pygame
 
 import anim
+import audio
 import config
 from anim import RollingCounter, Tween
 from cards import Card
@@ -65,15 +66,54 @@ ATTRACT_MARQUEE_TOP = 424
 DEAL_PRIORITY = {"player": 0, "dealer": 1}
 
 
-def play_sound(name: str) -> None:
-    """SOUND HOOK -- deliberately a no-op; audio is out of scope for now.
+#: name -> Sound, filled by init_audio(). Empty means "running silent", which
+#: is a perfectly good state for this machine to be in.
+_sounds: dict[str, "pygame.mixer.Sound"] = {}
 
-    Call sites already exist (coin accepted, card dealt, win, jam). To make the
-    machine noisy: init pygame.mixer in UI.__init__, load WAVs into a dict here,
-    and flip config.SOUND_ENABLED.
+
+def init_audio() -> str:
+    """Open the mixer and render audio.py's library into it. Returns a status
+    line for the boot log; never raises.
+
+    Sound is the one subsystem here that is allowed to simply not exist. A Pi
+    OS Lite install with no audio configured, a busy ALSA device, a cabinet
+    with no speaker -- all of them end up here returning a reason, and the game
+    plays on in silence rather than refusing to start over a jingle.
     """
     if not config.SOUND_ENABLED:
+        return "sound disabled in config"
+    try:
+        if pygame.mixer.get_init():
+            pygame.mixer.quit()  # reopen on our terms, not pygame.init()'s
+        pygame.mixer.init(
+            frequency=audio.SAMPLE_RATE,
+            size=-16,  # signed 16-bit, matching audio.to_pcm()
+            channels=1,  # mono: it is a television speaker
+            buffer=config.SOUND_BUFFER,
+        )
+        pygame.mixer.set_num_channels(config.SOUND_CHANNELS)
+        for name, pcm in audio.build_library(config.SOUND_VOLUME).items():
+            _sounds[name] = pygame.mixer.Sound(buffer=pcm)
+    except (pygame.error, ValueError) as exc:
+        _sounds.clear()
+        return f"no audio ({exc}); running silent"
+    return f"{len(_sounds)} sounds synthesised"
+
+
+def play_sound(name: str) -> None:
+    """Fire and forget. Unknown names and a dead mixer are both no-ops.
+
+    Never allowed to raise: every call site is in the middle of a hand or a
+    payout, and none of them should have to care whether the cabinet has a
+    speaker attached.
+    """
+    sound = _sounds.get(name)
+    if sound is None:
         return
+    try:
+        sound.play()
+    except pygame.error:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +138,8 @@ class CardSprite:
     is_deal: bool = False
     #: The back-to-face turn. None means "never been flipped" (hole card).
     flip: Tween | None = None
+    #: Whether the landing click has been played for this card yet.
+    landed: bool = False
 
     def pos(self, now_ms: int) -> tuple[float, float]:
         t = self.move.value(now_ms)
@@ -133,6 +175,8 @@ class UI:
         self.screen = self._make_screen(fullscreen)
         self.clock = pygame.time.Clock()
         self.show_safe_guide = config.SHOW_SAFE_AREA_GUIDE
+
+        print(f"[audio] {init_audio()}")
 
         self.font_huge = pygame.font.Font(config.FONT_PATH, config.FONT_SIZE_HUGE)
         self.font_large = pygame.font.Font(config.FONT_PATH, config.FONT_SIZE_LARGE)
@@ -190,6 +234,8 @@ class UI:
 
         #: Set by main.py when the test-coin key is armed on real hardware.
         self.test_coins_armed = False
+
+        self._last_card_sound_ms = -10_000
 
         self._attract_active = False
         self._attract_started_ms = 0
@@ -317,6 +363,7 @@ class UI:
         if game.shoe.shuffle_count != self._last_shuffle_count:
             self._shuffle_notice_ms = now_ms
             self._last_shuffle_count = game.shoe.shuffle_count
+            play_sound("shuffle")
 
         # One coin fell out of the dispenser: drop one on screen to match.
         if bank.owed_quarters < self._last_owed:
@@ -324,15 +371,18 @@ class UI:
                 self._payout_coins.append(
                     (now_ms, config.SCREEN_WIDTH - 74 + random.randint(-6, 6))
                 )
+            play_sound("dispense")
         self._last_owed = bank.owed_quarters
 
         if payout.status.jammed:
             if self._jam_since_ms < 0:
                 self._jam_since_ms = now_ms
+                play_sound("jam")
         else:
             self._jam_since_ms = -10_000
 
         self._sync_cards(game, now_ms)
+        self._play_landing_clicks(now_ms)
         self._prune(now_ms)
 
     def revealed(self, name: str) -> tuple[list[Card], bool]:
@@ -352,6 +402,22 @@ class UI:
             else:
                 hidden = True
         return shown, hidden
+
+    def _play_landing_clicks(self, now_ms: int) -> None:
+        """Click once per card, at the moment it touches the felt.
+
+        Driven from the animation rather than from the button press in main.py,
+        so a four-card deal is four separate clicks in the right rhythm instead
+        of one noise while the cards are still in the air.
+        """
+        for row in self.rows.values():
+            for sprite in row:
+                if sprite.landed or not sprite.move.done(now_ms):
+                    continue
+                sprite.landed = True
+                if now_ms - self._last_card_sound_ms >= config.SOUND_CARD_MIN_GAP_MS:
+                    self._last_card_sound_ms = now_ms
+                    play_sound("card")
 
     def is_dealing(self) -> bool:
         """True while a card is still on its way to the table or turning over.
@@ -569,8 +635,7 @@ class UI:
         smear on composite anyway. Solid shapes always render and read cleanly.
         """
         cx, cy = center
-        half = size // 2
-        quarter = max(2, size // 4)
+        half = size // 2  # the diamond is the only suit still built from it
 
         if suit == "D":
             pygame.draw.polygon(
@@ -579,31 +644,97 @@ class UI:
                 [(cx, cy - half), (cx + half, cy), (cx, cy + half), (cx - half, cy)],
             )
         elif suit == "H":
-            pygame.draw.circle(surface, color, (cx - quarter, cy - quarter), quarter)
-            pygame.draw.circle(surface, color, (cx + quarter, cy - quarter), quarter)
-            pygame.draw.polygon(
-                surface,
-                color,
-                [(cx - half, cy - quarter), (cx + half, cy - quarter), (cx, cy + half)],
-            )
+            self._draw_lobed_body(surface, cx, cy, size, color, point_down=True)
         elif suit == "S":
-            pygame.draw.polygon(
-                surface,
-                color,
-                [(cx, cy - half), (cx - half, cy + quarter), (cx + half, cy + quarter)],
+            # A spade is exactly a heart upside down, plus a stem.
+            lobe_y, radius = self._draw_lobed_body(
+                surface, cx, cy, size, color, point_down=False
             )
-            pygame.draw.circle(surface, color, (cx - quarter, cy + quarter), quarter)
-            pygame.draw.circle(surface, color, (cx + quarter, cy + quarter), quarter)
-            pygame.draw.rect(
-                surface, color, (cx - quarter // 2, cy + quarter, quarter, half // 2)
+            self._draw_stem(
+                surface, cx, lobe_y + round(radius * 0.3),
+                cy + round(size * 0.5), size, color,
             )
         else:  # clubs
-            pygame.draw.circle(surface, color, (cx, cy - quarter), quarter)
-            pygame.draw.circle(surface, color, (cx - quarter, cy + quarter // 2), quarter)
-            pygame.draw.circle(surface, color, (cx + quarter, cy + quarter // 2), quarter)
-            pygame.draw.rect(
-                surface, color, (cx - quarter // 2, cy + quarter, quarter, half // 2)
+            # Three lobes in a triangle, overlapping just enough to join into
+            # one shape. Spaced a hair further apart than they were: circles
+            # this size with their centres only a radius apart merge into an
+            # amorphous blob instead of reading as a clover.
+            radius = max(2, round(size * 0.26))
+            side_dx = max(1, round(size * 0.24))
+            top_y = cy - round(size * 0.22)
+            side_y = cy + round(size * 0.08)
+            pygame.draw.circle(surface, color, (cx, top_y), radius)
+            pygame.draw.circle(surface, color, (cx - side_dx, side_y), radius)
+            pygame.draw.circle(surface, color, (cx + side_dx, side_y), radius)
+            self._draw_stem(
+                surface, cx, side_y, cy + round(size * 0.5), size, color
             )
+
+    def _draw_lobed_body(
+        self,
+        surface: pygame.Surface,
+        cx: int,
+        cy: int,
+        size: int,
+        color: tuple[int, int, int],
+        point_down: bool,
+    ) -> tuple[int, int]:
+        """Two round lobes tapering to a point: a heart, or a spade's body.
+
+        ONE implementation, because a spade is a heart upside down and keeping
+        two copies of that geometry is how they drifted apart in the first
+        place. Both used to draw a triangle half a pixel wider than their own
+        lobes, which left little spikes on the shoulders -- the tell that a
+        card suit was built out of primitives rather than drawn.
+
+        The fix is the `span` below: the triangle's base corners land exactly
+        on the outer edge of the lobes, so the outline is continuous. Returns
+        (lobe_y, radius) for the spade, which hangs its stem off them.
+        """
+        radius = max(2, round(size * 0.25))
+        lobe_dx = max(1, round(radius * 0.9))
+        span = lobe_dx + radius  # the silhouette's true half-width
+        offset = round(size * 0.10)
+        reach = round(size * 0.48)
+
+        lobe_y = cy - offset if point_down else cy + offset
+        tip_y = cy + reach if point_down else cy - reach
+
+        pygame.draw.polygon(
+            surface, color, [(cx - span, lobe_y), (cx + span, lobe_y), (cx, tip_y)]
+        )
+        pygame.draw.circle(surface, color, (cx - lobe_dx, lobe_y), radius)
+        pygame.draw.circle(surface, color, (cx + lobe_dx, lobe_y), radius)
+        return lobe_y, radius
+
+    def _draw_stem(
+        self,
+        surface: pygame.Surface,
+        cx: int,
+        top: int,
+        bottom: int,
+        size: int,
+        color: tuple[int, int, int],
+    ) -> None:
+        """The flared foot under a spade or a club.
+
+        A plain rectangle -- which is what this used to be -- reads as a stick
+        rather than a stem, and at pip size a 3px stick is exactly the kind of
+        thin vertical the CRT shimmers on. The taper gives it some mass at the
+        bottom where the eye expects it.
+        """
+        top_half = max(1, round(size * 0.07))
+        bottom_half = max(2, round(size * 0.20))
+        pygame.draw.polygon(
+            surface,
+            color,
+            [
+                (cx - top_half, top),
+                (cx + top_half, top),
+                (cx + bottom_half, bottom),
+                (cx - bottom_half, bottom),
+            ],
+        )
 
     def _card_surface(self, card: Card | None) -> pygame.Surface:
         """One cached surface per card (None = the back). Built on first use."""

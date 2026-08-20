@@ -407,6 +407,34 @@ RESULT_SKIP_GRACE_MS = 600
 # Attract mode after this long with no input (0 disables).
 IDLE_ATTRACT_SECONDS = 30.0
 
-# SOUND HOOK: audio is out of scope. ui.play_sound() is a no-op stub; flip this
-# and fill it in when you want the machine to make noise.
-SOUND_ENABLED = False
+# --------------------------------------------------------------------------
+# Sound
+# --------------------------------------------------------------------------
+#
+# Every effect is synthesised at startup by audio.py -- there are no WAVs to
+# ship, nothing to find at runtime, and nothing that can go missing on the
+# cabinet. Set SOUND_ENABLED = False and the machine is silent again, with the
+# mixer never opened at all.
+#
+# If audio hardware is missing or busy the mixer simply fails to open and the
+# game carries on without it. Sound is never allowed to stop the machine.
+SOUND_ENABLED = True
+
+# Master level applied when the sounds are rendered, 0.0-1.0. The individual
+# effects are balanced against each other inside audio.py; change this rather
+# than those, or they stop being balanced.
+SOUND_VOLUME = 0.7
+
+# Mixer buffer in samples. Small = responsive, which is what an arcade button
+# needs; too small and a busy Pi underruns and crackles. 512 at 22.05kHz is
+# about 23ms of latency. Raise it to 1024 if you hear crackling.
+SOUND_BUFFER = 512
+
+# Simultaneous sounds. Four cards can be in the air at once, over a win jingle.
+SOUND_CHANNELS = 8
+
+# Don't retrigger the card-landing click more often than this. Four cards land
+# within 500ms of each other on a deal, and with animations disabled they land
+# in the SAME frame -- four identical waveforms in phase is not four times as
+# loud, it is a clipped bang.
+SOUND_CARD_MIN_GAP_MS = 40

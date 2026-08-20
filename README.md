@@ -20,6 +20,7 @@ cards.py             card + shoe model             (pure)
 bank.py              quarter balance, atomic persistence, payout FSM (pure)
 ui.py                pygame rendering + animation + keyboard (only pygame import)
 anim.py              easing curves, tweens, timing helpers   (pure)
+audio.py             procedurally synthesised sound effects  (pure)
 hardware/
   __init__.py        auto-detect + backend factory
   base.py            abstract Hardware interface, debounce, pulse grouping
@@ -29,7 +30,7 @@ tests/               unittest suite, no third-party deps
 blackjack.service    systemd unit
 ```
 
-`game.py`, `cards.py`, `bank.py` and `anim.py` import **nothing but the standard library
+`game.py`, `cards.py`, `bank.py`, `anim.py` and `audio.py` import **nothing but the standard library
 and `config.py`**. They run — and are tested — on a machine with neither pygame
 nor gpiozero installed. `ui.py` is the only file that imports pygame; `real.py`
 is the only file that imports gpiozero, and it does so *inside* a method so
@@ -227,6 +228,57 @@ one function long.
 `tests/test_anim.py` covers the tween and easing behaviour that everything else
 is built on, including that a zero-length tween snaps and that the credit meter
 always comes to rest on exactly the bank's number.
+
+---
+
+## Sound
+
+Every effect is **synthesised at startup**, not loaded from files. There are no
+WAVs to ship, nothing to find at runtime, and nothing that can go missing on the
+cabinet — and square waves are the right sound for the machine this is
+pretending to be anyway.
+
+`audio.py` is pure: it turns numbers into PCM bytes and stops there, so the
+waveforms are unit-tested on a machine with no sound card. `ui.py` remains the
+only file that talks to hardware, audio included.
+
+| sound | when |
+| --- | --- |
+| `coin` | a quarter is accepted — two rising blips |
+| `card` | each card **lands**, driven by the animation, not the button press |
+| `deal` | the riffle as a hand starts |
+| `bet` | the BET button |
+| `win` / `blackjack` / `push` / `lose` | the result banner appears |
+| `cashout` / `dispense` | payout starts / each quarter drops |
+| `shuffle` / `jam` | the cut card comes up / the dispenser gives up |
+
+Two details worth knowing. The card click is fired by the renderer when the
+sprite touches the felt, so a four-card deal is four clicks in the dealer's
+rhythm rather than one noise over cards still in the air — and it is throttled
+by `SOUND_CARD_MIN_GAP_MS`, because with `ANIMATIONS_ENABLED = False` all four
+land in the same frame, and four identical waveforms in phase is not four times
+as loud, it is a clipped bang. The result jingle is likewise tied to the banner
+rather than to the credit, since a natural settles while the cards are still
+falling.
+
+**Sound is never allowed to stop the machine.** No audio device, a busy ALSA,
+no speaker — the mixer fails to open, the boot log says why, and the game plays
+on in silence:
+
+```
+[audio] 12 sounds synthesised
+[audio] no audio (Audio target 'x' not available); running silent
+[audio] sound disabled in config
+```
+
+Turn it off with `SOUND_ENABLED = False`; tune with `SOUND_VOLUME`, and raise
+`SOUND_BUFFER` to 1024 if a busy Pi crackles.
+
+On the Pi the audio comes out of the **same 4-pole AV jack as the composite
+video** (tip = left, ring 1 = right), so the television plays it. Note that
+`blackjack.service` used to force `SDL_AUDIODRIVER=dummy`; it now selects ALSA
+and adds the `audio` group, with the dummy line left commented for silencing a
+cabinet at the system level.
 
 ---
 
@@ -579,11 +631,8 @@ release the pins.
   work for any bet size, so double needs no accounting changes; split is the
   one that needs `player_cards` to become a list of hands. Insurance re-opens
   the odd-quarter rounding question — route it through the same integer path.
-- **Sound.** `ui.play_sound()` is a no-op stub with call sites already in place
-  (coin, deal, card, win, lose, cash-out). Init `pygame.mixer`, load WAVs, flip
-  `config.SOUND_ENABLED`. The animations give you the timings to hang it on: a
-  card lands `CARD_FLY_MS` after it leaves the shoe, and turns over over the
-  following `CARD_FLIP_MS`.
+- ~~**Sound.**~~ Built — see [Sound](#sound). Synthesised in `audio.py`, played
+  by `ui.py`, and degrading to silence on a machine with no audio device.
 - **Coin acceptor inhibit.** `Hardware.set_coin_acceptor_enabled()` exists and
   does nothing; the CH-926 has an inhibit line if you want to refuse coins
   during a jam.

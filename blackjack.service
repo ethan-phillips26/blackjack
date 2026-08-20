@@ -10,14 +10,20 @@ Type=simple
 User=pi
 Group=pi
 # gpiozero needs gpio; SDL's KMSDRM backend needs video/render and input.
-SupplementaryGroups=gpio video render input
+SupplementaryGroups=gpio video render input audio
 
 WorkingDirectory=/home/pi/blackjack
 ExecStart=/home/pi/blackjack/.venv/bin/python /home/pi/blackjack/main.py --real --fullscreen
 
 # Render straight to the framebuffer -- there is no X server on the cabinet.
 Environment=SDL_VIDEODRIVER=kmsdrm
-Environment=SDL_AUDIODRIVER=dummy
+# Audio out of the same 4-pole AV jack as the composite video. Comment this
+# back in to silence the cabinet at the system level; config.SOUND_ENABLED does
+# the same thing from inside the program.
+#Environment=SDL_AUDIODRIVER=dummy
+Environment=SDL_AUDIODRIVER=alsa
+# The audio group is needed for /dev/snd/* under a bare systemd unit.
+Environment=AUDIODEV=default
 Environment=PYTHONUNBUFFERED=1
 
 # A crash must not strand a player's quarters. Restarting re-runs

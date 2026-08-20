@@ -21,7 +21,7 @@ import time
 import config
 from bank import Bank, PayoutController
 from cards import Shoe
-from game import BlackjackGame, Phase
+from game import BlackjackGame, Outcome, Phase
 from hardware import EventType, create_hardware, now_ms
 
 
@@ -417,6 +417,7 @@ class App:
                 self.clear_hand()
             if game.phase is Phase.BETTING:
                 game.cycle_bet()
+                self.play_sound("bet")
 
         elif button == config.BTN_DEAL:
             if game.phase is Phase.SETTLED:
@@ -439,7 +440,7 @@ class App:
             if game.phase is Phase.PLAYER_TURN:
                 game.hit()
                 self.dealer_next_ms = now + config.DEALER_STEP_MS
-                self.play_sound("card")
+                # No sound here: ui.py clicks when the card actually lands.
 
         elif button == config.BTN_STAND:
             if game.phase is Phase.PLAYER_TURN:
@@ -461,6 +462,15 @@ class App:
             self.play_sound("cashout")
 
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _result_sound(outcome: Outcome) -> str:
+        """A natural deserves more than the ordinary win jingle."""
+        if outcome is Outcome.PLAYER_BLACKJACK:
+            return "blackjack"
+        if outcome.is_push:
+            return "push"
+        return "win" if outcome.player_won else "lose"
 
     def update_attract(self, now: int) -> None:
         """Decide whether the title screen is up.
@@ -523,10 +533,14 @@ class App:
                 self.result_credited = True
                 self.settled_at_ms = 0
                 self.settled_decided_ms = now
-                self.play_sound("win" if game.result.outcome.player_won else "lose")
             elif self.settled_at_ms == 0:
                 if not self.ui.is_dealing():
                     self.settled_at_ms = now  # cards have landed: start the clock
+                    # Sound goes with the BANNER, not with the credit: on a
+                    # natural the hand settles while the cards are still in the
+                    # air, and a win jingle over a half-dealt hand sounds like
+                    # a bug even though the money is already right.
+                    self.play_sound(self._result_sound(game.result.outcome))
             elif now - self.settled_at_ms >= config.RESULT_DISPLAY_SECONDS * 1000:
                 self.clear_hand()
 
