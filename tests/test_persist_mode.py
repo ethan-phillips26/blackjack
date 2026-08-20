@@ -97,3 +97,37 @@ class TestAllModesAgreeOnTheMoney(PersistModeTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLedgerCanBeSilenced(PersistModeTestCase):
+    """The ledger is 15 call sites of open/write/close on the money path."""
+
+    def test_memory_mode_touches_no_disk_at_all(self):
+        """The promise of the mode: nothing is written while playing. Before
+        this was checked, memory mode still appended a ledger line per event."""
+        bank = self.bank("memory")
+        bank.insert_quarters(4)
+        bank.place_bet(2)
+        bank.credit(4, "SETTLE")
+        self.assertEqual(os.listdir(self.tmpdir), [])
+
+    def test_ledger_can_be_switched_off_independently(self):
+        with mock.patch.object(config, "LEDGER_ENABLED", False):
+            bank = self.bank("fast")
+            bank.insert_quarters(3)
+        self.assertFalse(os.path.exists(self.ledger_path))
+        self.assertTrue(os.path.exists(self.state_path))  # balance still kept
+
+    def test_it_is_on_by_default_for_a_machine_that_takes_real_money(self):
+        with mock.patch.object(config, "LEDGER_ENABLED", True):
+            bank = self.bank("fast")
+            bank.insert_quarters(1)
+        self.assertTrue(os.path.exists(self.ledger_path))
+
+    def test_switching_it_off_changes_no_money(self):
+        with mock.patch.object(config, "LEDGER_ENABLED", False):
+            bank = self.bank("fast")
+            bank.insert_quarters(4)
+            self.assertTrue(bank.place_bet(3))
+            bank.credit(6, "SETTLE")
+            self.assertEqual(bank.balance_quarters, 7)

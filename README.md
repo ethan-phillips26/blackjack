@@ -402,16 +402,22 @@ exit. The phase names answer the only question that matters here:
   decides how hard the machine works not to forget the balance, and the
   expensive part is fsync, not writing:
 
-  | mode | cost per save | survives |
-  | --- | --- | --- |
-  | `durable` | 12.8 ms (and seconds on a failing card) | the plug being pulled mid-write |
-  | `fast` *(default)* | 0.047 ms | quit, crash, reboot — not a power cut mid-write |
-  | `memory` | 0 ms, one write at exit | nothing; a kill loses your credits |
+  | mode | cost per save | disk writes per hand + cash-out | survives |
+  | --- | --- | --- | --- |
+  | `durable` | 12.8 ms (seconds on a failing card) | 35 writes, 40 fsyncs | the plug pulled mid-write |
+  | `fast` | 0.047 ms | 35 writes, 0 fsyncs | quit, crash, reboot |
+  | `memory` *(default)* | 0 ms | **1 write, at exit** | a clean exit only |
 
-  `fast` is 272× cheaper and **cannot stall**, because nothing waits on the
-  card to commit. It still writes the file atomically, so a restart finds your
-  balance exactly where you left it. That is the right setting for a cabinet in
-  your own home.
+  Note the middle column: dropping fsync does **not** drop the number of
+  writes, and on a failing card a plain write stalls too — the kernel throttles
+  a writer whose dirty pages are not clearing. That is why `fast` still
+  hitched. `LEDGER_ENABLED = False` removes 15 of those 35; `memory` removes
+  all but one.
+
+  `memory` is the right setting for a cabinet in your own home: it touches the
+  disk once, as it shuts down. Credits survive quitting normally and are lost
+  only to a power cut or a `kill -9`. `fast` is the middle ground — every
+  write still happens, just without waiting for the card to commit.
 
   Run `durable` if the machine is ever somewhere the public can feed it real
   money — it is the only mode in which the interrupted-payout reconciliation

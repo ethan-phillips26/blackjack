@@ -207,7 +207,16 @@ class Bank:
 
         Best-effort by design -- a full disk must never stop us paying out, so
         logging failures are swallowed.
+
+        Silent when config.LEDGER_ENABLED is off, and always silent under
+        PERSIST_MODE = "memory": that mode promises to leave the disk alone
+        while playing, and a line per money event would break the promise.
+        Every caller is fire-and-forget, so switching it off changes nothing
+        else about how the machine behaves.
         """
+        if not config.LEDGER_ENABLED or config.PERSIST_MODE == "memory":
+            return
+
         line = (
             f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\t{event}\t"
             f"bal={self.state.balance_quarters}\towed={self.state.owed_quarters}\t"

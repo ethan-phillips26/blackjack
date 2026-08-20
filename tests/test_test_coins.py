@@ -136,6 +136,16 @@ class TestTestCoinAccounting(unittest.TestCase):
     """A test coin spends like a real one but must never be counted like one."""
 
     def setUp(self):
+        # This is about the accounting contract -- test coins kept apart from
+        # real ones, in the ledger and in the lifetime totals -- not about how
+        # hard the machine persists. Pin the mode that writes everything, so
+        # the assertions do not quietly depend on config.py's deployment
+        # default (which is "memory" for a home cabinet).
+        for name, value in (("PERSIST_MODE", "durable"), ("LEDGER_ENABLED", True)):
+            patcher = mock.patch.object(config, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
         self.tmpdir = tempfile.mkdtemp(prefix="bjtest")
         self.state_path = os.path.join(self.tmpdir, "bank.json")
         self.ledger_path = os.path.join(self.tmpdir, "ledger.log")

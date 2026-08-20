@@ -340,7 +340,26 @@ ATTRACT_MARQUEE_TEXT = (
 # trustworthy under "durable". Under the other two a power cut during a payout
 # can lose the owed count, which for a home machine means you fish your own
 # quarters out of the hopper.
-PERSIST_MODE = "fast"
+# DEFAULT "memory": this cabinet lives in an apartment, its storage is failing,
+# and the money it holds is its owner's own. Zero disk writes while playing,
+# one on a clean exit. Change to "durable" before it ever takes a coin from
+# anybody else.
+PERSIST_MODE = "memory"
+
+# The append-only audit trail (state/ledger.log): one line per coin in, bet,
+# win and dispensed quarter. Invaluable when a machine that takes strangers'
+# money is accused of eating a quarter -- and pointless for a cabinet in your
+# own apartment, where it is just writes to the card you did not ask for.
+#
+# It is not free: it is written on EVERY money event, twice per quarter during
+# a cash-out, and it grows forever. On a tired card even these writes stall,
+# because the kernel throttles a writer whose dirty pages are not being flushed
+# fast enough -- no fsync required. Turn it off if the machine still hitches
+# after PERSIST_MODE = "fast".
+#
+# "memory" mode implies this off: a mode whose whole point is touching no disk
+# would be a lie if it still appended a line per event.
+LEDGER_ENABLED = True
 
 # --------------------------------------------------------------------------
 # Storage health
