@@ -73,6 +73,12 @@ class NullProfiler:
     def mark(self, phase: str) -> None:
         pass
 
+    def event_start(self) -> float:
+        return 0.0
+
+    def event_done(self, event, started: float) -> None:
+        pass
+
     def end(self, draw_ms: float) -> None:
         pass
 
@@ -97,7 +103,11 @@ class FrameProfiler(NullProfiler):
     """
 
     enabled = True
-    PHASES = ("input", "events", "payout", "animate", "logic", "draw")
+    # "gap" is the time we were NOT running: the frame limiter's sleep plus
+    # anything the OS did instead of us. A large gap with small phases means
+    # the process is being starved from outside -- swap, thermal throttling, a
+    # busy X server -- not that this program is slow.
+    PHASES = ("gap", "input", "hw", "events", "payout", "animate", "logic", "draw")
 
     def __init__(self, slow_frame_ms: float) -> None:
         self.slow_frame_ms = slow_frame_ms
@@ -105,13 +115,26 @@ class FrameProfiler(NullProfiler):
         self.slow_frames = 0
         self.started = time.perf_counter()
         self._phase_start = self.started
+        self._last_end = self.started
         self._current: dict[str, float] = {}
+        self._events: list[tuple[str, float]] = []
         self._samples: dict[str, list[float]] = {p: [] for p in self.PHASES}
         self._totals: list[float] = []
 
     def begin(self) -> None:
-        self._phase_start = time.perf_counter()
-        self._current = {}
+        now = time.perf_counter()
+        self._current = {"gap": (now - self._last_end) * 1000.0}
+        self._events = []
+        self._phase_start = now
+
+    def event_start(self) -> float:
+        return time.perf_counter()
+
+    def event_done(self, event, started: float) -> None:
+        name = event.type.name
+        if event.button:
+            name = f"{name}({event.button})"
+        self._events.append((name, (time.perf_counter() - started) * 1000.0))
 
     def mark(self, phase: str) -> None:
         now = time.perf_counter()
@@ -120,6 +143,7 @@ class FrameProfiler(NullProfiler):
 
     def end(self, draw_ms: float) -> None:
         self._current["draw"] = draw_ms
+        self._last_end = time.perf_counter()
         self.frames += 1
         total = sum(self._current.values())
         self._totals.append(total)
@@ -137,6 +161,14 @@ class FrameProfiler(NullProfiler):
                 f"[profile] SLOW FRAME {self.frames}: {total:.1f}ms "
                 f"(mostly {worst[0]})  {detail}"
             )
+            if self._events:
+                # Which event, not just which phase. An event storm and one
+                # slow handler both land in "events" and are fixed differently.
+                busiest = sorted(self._events, key=lambda kv: -kv[1])[:4]
+                listed = "  ".join(f"{n} {ms:.1f}" for n, ms in busiest)
+                print(
+                    f"[profile]   {len(self._events)} event(s) this frame: {listed}"
+                )
 
     @staticmethod
     def _p95(values: list[float]) -> float:
@@ -163,8 +195,10 @@ class FrameProfiler(NullProfiler):
         share = 100.0 * self.slow_frames / self.frames
         print(f"[profile] {self.slow_frames} frames over "
               f"{self.slow_frame_ms:.0f}ms ({share:.1f}%)")
-        print("[profile] a big 'events' or 'logic' worst-case is the SD card "
-              "(bank.py fsyncs); a big 'draw' is the graphics.")
+        print("[profile] a big 'events'/'logic' worst case is a bank write "
+              "(check tools/disk_check.py); 'draw' is the graphics;")
+        print("[profile] 'gap' is the OS not scheduling us -- swap, thermal "
+              "throttling, or something else on the machine.")
 
 
 class App:
@@ -271,9 +305,12 @@ class App:
         self.profiler.mark("input")
 
         self.hardware.update(now)
+        self.profiler.mark("hw")
 
         for event in self.hardware.poll_events():
+            started = self.profiler.event_start()
             self.handle_hardware_event(event, now)
+            self.profiler.event_done(event, started)
         self.profiler.mark("events")
 
         # RE-READ THE CLOCK. Everything from here measures elapsed real time,
