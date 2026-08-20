@@ -19,7 +19,9 @@ from hardware.base import EventType, Hardware, HardwareEvent, PulseAccumulator, 
 
 class RealHardware(Hardware):
     name = "pi"
-    accepts_simulated_input = False  # keyboard must not be able to mint coins
+    # Off by default: the keyboard must not be able to mint coins. The operator
+    # can deliberately re-arm the test-coin key alone -- see config.
+    accepts_simulated_input = config.ALLOW_TEST_COINS_ON_REAL_HARDWARE
 
     def __init__(self, has_drop_sensor: bool = config.USE_DROP_SENSOR) -> None:
         super().__init__()
@@ -101,12 +103,16 @@ class RealHardware(Hardware):
 
     # -- GPIO callbacks (these run on gpiozero threads) --------------------
     #
-    # They only touch the thread-safe event queue and the accumulator, and the
-    # accumulator is only ever touched from the coin callback, so no locking.
+    # They only touch the thread-safe event queue and the accumulator. The
+    # accumulator IS shared now -- the coin callback runs on a gpiozero thread,
+    # simulate_coin_insert() runs on the main loop, and update() flushes stale
+    # groups -- so every touch of it takes self._lock.
 
     def _on_coin_pulse(self, _device: object = None) -> None:
         stamp = now_ms()
-        for _coin in range(self._pulses.pulse(stamp)):
+        with self._lock:
+            coins = self._pulses.pulse(stamp)
+        for _coin in range(coins):
             self._emit(HardwareEvent(EventType.COIN_INSERTED, timestamp_ms=stamp))
 
     def _on_beam_break(self, _device: object = None) -> None:
@@ -122,7 +128,46 @@ class RealHardware(Hardware):
     def update(self, now: int) -> None:
         # Discard a pulse group that never completed (noise, or a coin the
         # acceptor rejected part-way).
-        self._pulses.flush(now)
+        with self._lock:
+            self._pulses.flush(now)
+
+    # -- simulated input ---------------------------------------------------
+
+    def simulate_coin_insert(self, count: int = 1) -> None:
+        """Test key on a real cabinet: credit a quarter nobody put in.
+
+        Only does anything when config.ALLOW_TEST_COINS_ON_REAL_HARDWARE is on;
+        the class attribute is read from the same flag, so if that is False
+        this method is unreachable from ui.py anyway and the check here is the
+        belt to that braces.
+
+        The pulses go through the SAME PulseAccumulator as the acceptor's, so
+        this exercises the real debounce and pulse-grouping path rather than
+        shortcutting to a credit -- if COIN_PULSES_PER_COIN is misconfigured,
+        the test key will get it wrong in exactly the way a real quarter does.
+
+        The resulting event is marked simulated=True, which is what keeps the
+        credit out of the cash-box totals downstream. Every one is logged: an
+        operator adding themselves credit should leave a trail in the journal.
+        """
+        if not config.ALLOW_TEST_COINS_ON_REAL_HARDWARE:
+            return
+        for _ in range(count):
+            for pulse in range(config.COIN_PULSES_PER_COIN):
+                # Space the pulses so they clear the debouncer, exactly as the
+                # acceptor's own output would.
+                stamp = now_ms() + pulse * (config.COIN_PULSE_DEBOUNCE_MS + 5)
+                with self._lock:
+                    coins = self._pulses.pulse(stamp)
+                for _coin in range(coins):
+                    self._emit(
+                        HardwareEvent(
+                            EventType.COIN_INSERTED,
+                            timestamp_ms=stamp,
+                            simulated=True,
+                        )
+                    )
+                    print("[pi] TEST COIN credited from the keyboard")
 
     # -- output ------------------------------------------------------------
 
@@ -139,3 +184,9 @@ class RealHardware(Hardware):
         # EXTENSION POINT: the CH-926 has an inhibit input. Drive it from a
         # spare pin here to refuse coins during a jam or a payout.
         pass
+
+    def describe(self) -> str:
+        line = super().describe()
+        if self.accepts_simulated_input:
+            line += "  ** TEST COIN KEY ARMED -- 'Q' mints credits **"
+        return line

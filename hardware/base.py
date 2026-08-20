@@ -58,6 +58,11 @@ class HardwareEvent:
     button: str | None = None
     # Monotonic milliseconds when the backend observed it.
     timestamp_ms: int = 0
+    # True when this came from a test key rather than the physical world. Real
+    # money and test money must stay tellable apart all the way to the ledger,
+    # so this rides along with the event instead of being inferred later from
+    # which backend happened to be running.
+    simulated: bool = False
 
 
 class Hardware(ABC):
@@ -138,12 +143,22 @@ class Hardware(ABC):
     def simulate_coin_insert(self, count: int = 1) -> None:
         """Test key: pretend the acceptor took a quarter.
 
-        No-op unless the backend opts in. This MUST stay inert on real hardware
-        -- a keystroke that mints credits is a free-money bug, not a debug aid.
+        No-op unless the backend opts in. Inert on real hardware by default --
+        a keystroke that mints credits is a free-money bug, not a debug aid --
+        but RealHardware will honour it when the operator has deliberately set
+        config.ALLOW_TEST_COINS_ON_REAL_HARDWARE. Backends that do implement it
+        must emit COIN_INSERTED with simulated=True so the credit stays
+        traceable in the ledger.
         """
 
     def simulate_coin_drop(self) -> None:
-        """Test key: pretend the IR beam saw a coin fall. Inert on real hardware."""
+        """Test key: pretend the IR beam saw a coin fall.
+
+        Inert on real hardware, unconditionally and with no flag to change it.
+        Faking a drop makes the machine believe a coin it never dispensed
+        reached the player -- that loses the PLAYER's money, which is a
+        different and worse thing than the operator gifting themselves credit.
+        """
 
     def toggle_simulated_jam(self) -> bool:
         """Test key: stop auto-confirming drops so the jam path can be exercised.

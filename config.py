@@ -141,6 +141,29 @@ COIN_PULSE_ACTIVE_LOW = True
 
 QUARTER_VALUE_CENTS = 25  # display only -- accounting is in whole quarters.
 
+# --- Test-coin key on real hardware ---------------------------------------
+# Normally the PC-only test keys are inert on the Pi, because a keystroke that
+# mints credits is a free-money bug rather than a debug aid. This flag re-arms
+# ONE of them -- KEY_TEST_INSERT_COIN ('Q') -- on real hardware, so a keyboard
+# can add credits without feeding the acceptor. Useful for bench-testing a
+# built cabinet, and for an operator adding credits without opening the box.
+#
+# It is deliberately NOT a blanket "enable the test keys" switch:
+#   * 'D' (fake IR coin drop) stays inert whatever this is set to. Confirming a
+#     coin that never physically fell makes the machine believe it paid a
+#     player it did not -- that loses somebody ELSE'S money, not the operator's.
+#   * 'J' (jam simulation) stays inert too; on a real dispenser you can create
+#     a jam by holding the slide.
+#
+# A test coin is still a real credit and can still be cashed out as a real
+# quarter, so it is kept OUT of the cash-box accounting: it lands in the ledger
+# as TEST_COIN_IN and counts toward lifetime_test_coins_in, never
+# lifetime_coins_in. Cash box reconciliation stays honest either way.
+#
+# SET THIS BACK TO False BEFORE A CABINET GOES OUT IN PUBLIC. While it is True
+# the machine says so on screen and in the boot log.
+ALLOW_TEST_COINS_ON_REAL_HARDWARE = True
+
 # --------------------------------------------------------------------------
 # Coin-slide dispenser (solenoid)
 # --------------------------------------------------------------------------
@@ -232,12 +255,74 @@ MOCK_AUTO_CONFIRM_DROPS = True
 MOCK_AUTO_CONFIRM_DELAY_MS = 80
 
 # --------------------------------------------------------------------------
+# Animation
+# --------------------------------------------------------------------------
+#
+# All animation is PURELY COSMETIC. It never gates a coin, a bet, or a payout:
+# the rules engine and the bank run at full speed regardless, and setting
+# ANIMATIONS_ENABLED = False must leave a fully playable machine. Timings are
+# in milliseconds and are deliberately short -- an arcade cabinet has to feel
+# snappy, and a 30fps composite CRT smears anything slow and floaty.
+
+ANIMATIONS_ENABLED = True
+
+# --- Dealing ---------------------------------------------------------------
+# Cards fly out of the shoe (drawn top-right) to their place on the felt.
+CARD_FLY_MS = 200  # shoe -> table for one card
+CARD_DEAL_STAGGER_MS = 125  # gap between consecutive cards leaving the shoe
+CARD_FLIP_MS = 150  # face-down -> face-up turn
+CARD_SLIDE_MS = 170  # existing cards shuffling over as a hand grows
+CARD_SWEEP_MS = 260  # end of hand: cards swept off to the discard tray
+CARD_DEAL_ANGLE = 18.0  # degrees of tilt a card carries out of the shoe
+CARD_DEAL_START_SCALE = 0.82  # cards leave the shoe slightly small
+
+# A full four-card deal therefore takes 3 * 125 + 200 + 150 = 725ms, dealt in
+# table order: player, dealer up-card, player, dealer hole card.
+
+# Where the shoe sits (top-left corner of the drawn stack). Cards fly from its
+# centre. Kept clear of the dealer's hand and of the BET readout.
+SHOE_POS = (548, 92)
+SHOE_SCALE = 0.62
+
+# --- Feedback --------------------------------------------------------------
+BANNER_POP_MS = 260  # result banner springs in
+BANNER_SHAKE_MS = 380  # ...and shakes instead, on a losing hand
+BANNER_SHAKE_PX = 9
+COUNTER_ROLL_MS = 260  # CREDITS meter rolls to its new value
+FLASH_MS = 380  # brighten-and-fade on a coin in / credit change
+BET_BUMP_MS = 220  # BET readout pops when the bet changes
+SHUFFLE_NOTICE_MS = 1400  # "SHUFFLING" card slides in and out
+PAYOUT_COIN_FALL_MS = 520  # a quarter tumbling out of the dispenser
+PAYOUT_COIN_RADIUS = 11
+JAM_FLASH_PERIOD_MS = 500  # jam overlay border alternates at this rate
+PROMPT_BLINK_MS = 900  # "INSERT QUARTERS" blink period
+
+# --- Attract / title screen ------------------------------------------------
+ATTRACT_LETTER_DROP_MS = 420  # each letter of the title falls in
+ATTRACT_LETTER_STAGGER_MS = 55
+ATTRACT_CARD_SLIDE_MS = 620  # the two demo cards slide in from the wings
+ATTRACT_WAVE_PERIOD_MS = 2600  # title letters ripple after they land
+ATTRACT_WAVE_PX = 5
+ATTRACT_MARQUEE_PX_PER_S = 74  # bottom ticker scroll speed
+ATTRACT_PIP_COUNT = 14  # drifting suit pips in the background
+ATTRACT_PIP_PERIOD_MS = 9000  # time for one pip to cross the screen
+ATTRACT_MARQUEE_TEXT = (
+    "BLACKJACK PAYS 3 TO 2   -   DEALER STANDS ON ALL 17   -   "
+    "BET 1 TO 4 QUARTERS   -   HIT OR STAND   -   CASH OUT ANY TIME   -   "
+)
+
+# --------------------------------------------------------------------------
 # Misc
 # --------------------------------------------------------------------------
 
 # Milliseconds between the dealer's cards, so the hand plays out at a
 # watchable pace instead of appearing all at once.
 DEALER_STEP_MS = 650
+
+# When an animation is still playing the dealer waits for it, then pauses this
+# much longer -- drawing a card the instant the hole card finishes flipping
+# looks like a glitch rather than a decision.
+DEALER_BEAT_MS = 180
 
 # Seconds a finished hand's result stays on screen before returning to idle.
 RESULT_DISPLAY_SECONDS = 3.0

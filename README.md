@@ -18,7 +18,8 @@ config.py            EVERY constant: pins, keys, timings, rules, safe area
 game.py              blackjack rules engine        (pure)
 cards.py             card + shoe model             (pure)
 bank.py              quarter balance, atomic persistence, payout FSM (pure)
-ui.py                pygame rendering + keyboard   (the only pygame import)
+ui.py                pygame rendering + animation + keyboard (only pygame import)
+anim.py              easing curves, tweens, timing helpers   (pure)
 hardware/
   __init__.py        auto-detect + backend factory
   base.py            abstract Hardware interface, debounce, pulse grouping
@@ -28,7 +29,7 @@ tests/               unittest suite, no third-party deps
 blackjack.service    systemd unit
 ```
 
-`game.py`, `cards.py` and `bank.py` import **nothing but the standard library
+`game.py`, `cards.py`, `bank.py` and `anim.py` import **nothing but the standard library
 and `config.py`**. They run — and are tested — on a machine with neither pygame
 nor gpiozero installed. `ui.py` is the only file that imports pygame; `real.py`
 is the only file that imports gpiozero, and it does so *inside* a method so
@@ -58,6 +59,12 @@ either way with `--mock` / `--real`. Other flags: `--fullscreen`, `--windowed`,
 | `H` | HIT |
 | `S` | STAND |
 | `C` | CASH OUT — dispenses the whole balance (and doubles as jam retry) |
+| `F11` | fullscreen |
+| `G` | draw the overscan-safe-area box |
+| `Esc` | quit |
+
+**These all work on the Pi too**, alongside the arcade buttons — see
+[Keyboard on the Pi](#keyboard-on-the-pi).
 
 ### Test keys (mock backend only)
 
@@ -66,13 +73,10 @@ either way with `--mock` / `--real`. Other flags: `--fullscreen`, `--windowed`,
 | `Q` | inserting a quarter — fed through the real pulse-grouping code |
 | `D` | the IR beam seeing a coin drop |
 | `J` | toggle "coins will drop" — turn it off to force a dispenser jam |
-| `F11` | fullscreen |
-| `G` | draw the overscan-safe-area box |
-| `Esc` | quit |
 
-These are inert on real hardware. `Hardware.simulate_coin_insert()` is a no-op
-in `RealHardware` on purpose: a keystroke that mints credits is a free-money
-bug, not a debug aid.
+These three are inert on real hardware. `Hardware.simulate_coin_insert()` is a
+no-op in `RealHardware` on purpose: a keystroke that mints credits is a
+free-money bug, not a debug aid.
 
 Dispenser actuations print to the console:
 
@@ -102,6 +106,11 @@ money code have no GUI or GPIO dependencies.
 (including 3-card 21 *not* being a natural), dealer draw logic on hard and soft
 17, every win/lose/push/bust outcome, and the payout table — with the 3:2
 odd-bet rounding checked under all three policies.
+
+`tests/test_anim.py` covers the animation timing primitives — easing curves
+that start at 0 and land on 1, delayed and zero-length tweens, shake decay, and
+a credit meter that always settles on exactly the number the bank holds. No
+pygame involved, so it runs with the same bare Python as the rest.
 
 `tests/test_bank.py` covers atomic persistence, cash-out transfer, open- and
 closed-loop dispensing, jams, and crash reconciliation. The headline test is
@@ -163,6 +172,64 @@ the machine is running.
 
 ---
 
+## Animation
+
+All motion lives in `ui.py` and is **purely cosmetic**. The rules engine still
+deals a hand in one call and the bank still credits winnings the instant a hand
+settles; the renderer diffs what it sees each frame against what it drew last
+frame and starts whatever motion that implies. Nothing an animation does can
+change a card, a bet, or a quarter.
+
+Set `ANIMATIONS_ENABLED = False` in `config.py` and every duration collapses to
+zero, every blink stays lit, and you get exactly the machine you had before —
+same screens, same pacing, no second code path. Useful on a very slow Pi, or if
+a cabinet is going somewhere the motion would be a distraction.
+
+**On the table**
+
+- **The deal.** Cards fly out of the shoe drawn top-right and land in the hand,
+  face down, then turn over. They come out in real table order — player, dealer
+  up-card, player, dealer hole card — 125 ms apart, so a full deal takes about
+  three quarters of a second. `game.deal()` still hands the UI all four at once;
+  `ui.py` walks them out in order on its own.
+- **Hand totals count only what is face up.** "YOU 18" over two face-down cards
+  would give the deal away, so the totals climb card by card as each one turns.
+  The dealer's shows `15+` while anything of theirs is still hidden.
+- **The hole card** turns over when the player stands, and the dealer waits for
+  it to finish before drawing (`DEALER_BEAT_MS`).
+- **A growing hand re-centres**, so the cards already down slide over to make
+  room instead of jumping.
+- **End of hand**, the cards sweep off to the discard tray.
+- **The result banner** springs in on a win and shakes on a loss — and waits for
+  the cards to land first, so a natural doesn't shout BLACKJACK! over cards that
+  are still in the air.
+- **CREDITS rolls** to its new value and flashes on a coin; **BET** pops when
+  you change it; **SHUFFLING THE SHOE** slides in when the cut card comes up.
+- **Paying out**, a quarter tumbles down the screen for each coin — driven by
+  `bank.owed_quarters` going down, so what you see is what the dispenser has
+  actually confirmed, never an optimistic guess.
+
+**The title screen**
+
+`IDLE_ATTRACT_SECONDS` after the last button press — and at boot — the cabinet
+shows its attract screen: the title dropping in a letter at a time and then
+rippling, an ace and a king sliding in from the wings, a blinking INSERT
+QUARTER, drifting suit pips, and a marquee of the house rules along the bottom.
+Any button or any coin wakes it; the press that wakes it is swallowed, so
+nobody's first touch costs them a bet.
+
+It will **never** appear while there are credits on the meter, a hand in
+progress, coins owed, or a jam on screen. Money on the meter always beats a
+pretty animation — that rule is in `App.update_attract()` and is worth keeping
+one function long.
+
+**Timings** are all in the `# Animation` block of `config.py`, in milliseconds.
+`tests/test_anim.py` covers the tween and easing behaviour that everything else
+is built on, including that a zero-length tween snaps and that the credit meter
+always comes to rest on exactly the bank's number.
+
+---
+
 ## Running on the Raspberry Pi
 
 ### Composite video
@@ -203,6 +270,48 @@ The palette and fonts are chosen for composite too: no pure white or black
 (they bloom and smear), desaturated red instead of saturated red (chroma crawl),
 big bold type, and a 3 px minimum stroke — 1 px lines shimmer on an interlaced
 display.
+
+### Keyboard on the Pi
+
+The keyboard mirror is **always live** — it is `Hardware.inject_button()` on the
+base class, not something the mock backend adds, so `B` / `Enter` / `H` / `S` /
+`C` work on the cabinet exactly as they do on a PC, in parallel with the wired
+arcade buttons. Nothing to enable and no flag to pass:
+
+```bash
+python3 main.py --real
+```
+
+A USB keyboard is genuinely useful for servicing a machine, which is why
+pressing HIT from one is allowed. What is *not* allowed is `Q` / `D` / `J`: the
+three test keys stay no-ops on real hardware, because a keystroke that mints
+credits or fakes a coin drop is a free-money bug rather than a debug aid. If
+you want those on the Pi — bench-testing the cabinet before any electronics are
+wired — run the mock backend on it instead:
+
+```bash
+python3 main.py --mock --fullscreen     # composite output, no GPIO, all test keys
+```
+
+Two things actually get in the way, and neither is this program:
+
+- **The keyboard has to be plugged into the Pi.** With no X or Wayland session,
+  SDL reads `/dev/input/event*` directly, so keys typed into an *SSH* session
+  never reach the game. Log in over SSH to start it if you like, but press the
+  keys on a keyboard attached to the Pi.
+- **The process needs permission to read those devices**, i.e. membership of
+  the `input` group. `blackjack.service` already grants it
+  (`SupplementaryGroups=gpio video render input`); for a manual run:
+
+  ```bash
+  sudo usermod -aG input,video,render,gpio $USER   # log out and back in
+  ```
+
+  Symptom of getting this wrong: the game draws on the CRT perfectly and
+  ignores every key.
+
+If you are running under the desktop rather than straight to the framebuffer,
+none of that applies — it is an ordinary window and just needs focus.
 
 ### Install
 
@@ -342,7 +451,9 @@ release the pins.
   the odd-quarter rounding question — route it through the same integer path.
 - **Sound.** `ui.play_sound()` is a no-op stub with call sites already in place
   (coin, deal, card, win, lose, cash-out). Init `pygame.mixer`, load WAVs, flip
-  `config.SOUND_ENABLED`.
+  `config.SOUND_ENABLED`. The animations give you the timings to hang it on: a
+  card lands `CARD_FLY_MS` after it leaves the shoe, and turns over over the
+  following `CARD_FLIP_MS`.
 - **Coin acceptor inhibit.** `Hardware.set_coin_acceptor_enabled()` exists and
   does nothing; the CH-926 has an inhibit line if you want to refuse coins
   during a jam.

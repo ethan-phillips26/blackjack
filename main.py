@@ -4,6 +4,11 @@ Entry point: argument parsing, backend selection, and the main loop.
 This file is the only place the four layers meet. It owns no rules and no
 money math -- it moves events from the hardware into game.py / bank.py and
 hands the resulting state to ui.py to draw.
+
+It also owns the attract/title screen: which screen is up is a property of the
+machine, not of the renderer. The rule is one line long and worth keeping that
+way -- NEVER show the title screen while the player has credits or is owed
+coins. Money on the meter always beats a pretty animation.
 """
 
 from __future__ import annotations
@@ -62,8 +67,12 @@ class App:
 
         self.running = True
         self.dealer_next_ms = 0
+        #: When the finished hand's banner went up. 0 = waiting for the cards
+        #: to stop moving first, so the result never outruns the deal.
         self.settled_at_ms = 0
         self.result_credited = False
+        self.last_input_ms = now_ms()
+        self.attract = False
 
         # ui.py is imported late so that --help and a broken pygame install
         # don't stop main.py from being importable.
@@ -72,6 +81,15 @@ class App:
         self.play_sound = play_sound
         fullscreen = self._want_fullscreen(args)
         self.ui = UI(fullscreen=fullscreen)
+
+        # Boot into the title screen, but only from a genuinely idle machine:
+        # an empty meter, nothing owed, and no reconcile message to read.
+        self.attract = (
+            config.IDLE_ATTRACT_SECONDS > 0
+            and self.bank.balance_quarters == 0
+            and self.bank.owed_quarters == 0
+            and not self.notice
+        )
 
     def _want_fullscreen(self, args: argparse.Namespace) -> bool:
         if args.fullscreen:
@@ -120,6 +138,11 @@ class App:
         # needed, so it is safe to energize on its say-so.
         self.hardware.set_solenoid(self.payout.tick(now))
 
+        # Animation state is refreshed BEFORE the hand advances, so that
+        # advance_hand() sees this frame's cards when it asks is_dealing().
+        self.ui.update(self.game, self.bank, self.payout, now)
+        self.update_attract(now)
+
         self.advance_hand(now)
 
         notice = self.notice if now < self.notice_until_ms else None
@@ -129,12 +152,20 @@ class App:
 
     def handle_hardware_event(self, event, now: int) -> None:
         if event.type is EventType.COIN_INSERTED:
+            self.last_input_ms = now
+            self.attract = False  # a coin always wakes the machine
             self.bank.insert_quarters(1)
             self.game.clamp_bet(self.bank.balance_quarters)
             self.play_sound("coin")
         elif event.type is EventType.COIN_DROP_DETECTED:
             self.payout.on_drop_detected(now)
         elif event.type is EventType.BUTTON_PRESSED:
+            self.last_input_ms = now
+            if self.attract:
+                # Arcade convention: the press that wakes the cabinet only
+                # wakes it. Nobody's first touch should cost them a bet.
+                self.attract = False
+                return
             self.handle_button(event.button, now)
         elif event.type is EventType.QUIT_REQUESTED:
             self.running = False
@@ -193,21 +224,61 @@ class App:
 
     # ------------------------------------------------------------------
 
+    def update_attract(self, now: int) -> None:
+        """Decide whether the title screen is up.
+
+        Two hard rules, in this order: the machine must be idle AND the player
+        must have nothing riding on it. Credits on the meter, a hand in
+        progress, coins owed, or a jam all keep the game screen up no matter
+        how long nobody has touched a button.
+        """
+        if config.IDLE_ATTRACT_SECONDS <= 0:
+            self.attract = False
+            self.ui.set_attract(False)
+            return
+
+        idle_ok = (
+            self.game.phase is Phase.BETTING
+            and self.bank.balance_quarters == 0
+            and not self.payout_busy
+            and not self.payout.status.jammed
+            and not self.ui.is_dealing()
+        )
+        if not idle_ok:
+            self.attract = False
+        elif now - self.last_input_ms >= config.IDLE_ATTRACT_SECONDS * 1000:
+            self.attract = True
+
+        self.ui.set_attract(self.attract)
+
     def advance_hand(self, now: int) -> None:
         game = self.game
 
-        if game.phase is Phase.DEALER_TURN and now >= self.dealer_next_ms:
-            game.dealer_step()
-            self.dealer_next_ms = now + config.DEALER_STEP_MS
+        if game.phase is Phase.DEALER_TURN:
+            if self.ui.is_dealing():
+                # Wait for the hole card to finish turning over (or the last
+                # card to land) and then take a beat, so the dealer looks like
+                # it decided rather than glitched.
+                self.dealer_next_ms = max(
+                    self.dealer_next_ms, now + config.DEALER_BEAT_MS
+                )
+            elif now >= self.dealer_next_ms:
+                game.dealer_step()
+                self.dealer_next_ms = now + config.DEALER_STEP_MS
 
         if game.phase is Phase.SETTLED and game.result is not None:
             if not self.result_credited:
                 # Winnings go to the CREDIT METER, not to the hopper. Coins only
                 # move when the player asks for them with CASH OUT.
+                # Credited IMMEDIATELY -- the money is never made to wait on an
+                # animation. Only the on-screen countdown does.
                 self.bank.credit(game.result.returned_quarters, "SETTLE")
                 self.result_credited = True
-                self.settled_at_ms = now
+                self.settled_at_ms = 0
                 self.play_sound("win" if game.result.outcome.player_won else "lose")
+            elif self.settled_at_ms == 0:
+                if not self.ui.is_dealing():
+                    self.settled_at_ms = now  # cards have landed: start the clock
             elif now - self.settled_at_ms >= config.RESULT_DISPLAY_SECONDS * 1000:
                 self.clear_hand()
 
@@ -215,6 +286,7 @@ class App:
         self.game.clear()
         self.game.clamp_bet(self.bank.balance_quarters)
         self.result_credited = False
+        self.settled_at_ms = 0
 
 
 def main(argv: list[str] | None = None) -> int:
