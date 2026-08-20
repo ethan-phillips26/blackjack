@@ -13,6 +13,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 import config
 from bank import Bank, BankState, PayoutController, PayoutPhase
@@ -22,6 +23,14 @@ DROP_DELAY_MS = 50  # how long after the coil fires the coin breaks the beam
 
 class BankTestCase(unittest.TestCase):
     def setUp(self):
+        # These tests are about the STRONGEST guarantee the machine offers, so
+        # they pin the durable mode rather than inheriting whatever config.py
+        # happens to ship as the default. config.PERSIST_MODE is a deployment
+        # choice; the crash-safety contract below is not.
+        patcher = mock.patch.object(config, "PERSIST_MODE", "durable")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
         self.tmpdir = tempfile.mkdtemp(prefix="bjbank")
         self.state_path = os.path.join(self.tmpdir, "bank.json")
         self.ledger_path = os.path.join(self.tmpdir, "ledger.log")

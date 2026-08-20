@@ -312,6 +312,37 @@ ATTRACT_MARQUEE_TEXT = (
 )
 
 # --------------------------------------------------------------------------
+# Storage durability
+# --------------------------------------------------------------------------
+#
+# How hard the machine works to not forget your money. The expensive part is
+# never the writing -- it is fsync, which forces the card to actually commit
+# before the game may continue, and which a tired SD card can sit on for
+# SECONDS while the whole cabinet appears frozen.
+#
+#   "durable"  temp file, fsync, rename, fsync the directory. The balance
+#              survives the plug being pulled at any instant, including
+#              mid-write. This is what a machine taking strangers' money in a
+#              public place should run, and it is the only mode in which the
+#              crash-reconciliation in bank.py means anything.
+#
+#   "fast"     the same atomic rename, without the fsyncs. The file is still
+#              written and still correct, so credits survive quitting, a crash,
+#              and a reboot -- just not power being cut in the split second of
+#              a write. Costs microseconds instead of milliseconds, and cannot
+#              stall. DEFAULT: right for a machine in your own home.
+#
+#   "memory"   never touch the disk while playing; the balance is written once
+#              on a clean exit. Nothing survives a power cut or a kill -9,
+#              including quarters the dispenser still owes you.
+#
+# The payout reconciliation (resuming an interrupted cash-out) is only
+# trustworthy under "durable". Under the other two a power cut during a payout
+# can lose the owed count, which for a home machine means you fish your own
+# quarters out of the hopper.
+PERSIST_MODE = "fast"
+
+# --------------------------------------------------------------------------
 # Storage health
 # --------------------------------------------------------------------------
 

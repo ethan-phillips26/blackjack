@@ -728,7 +728,19 @@ class UI:
         self._draw_credits(safe_x, safe_y, now)
         self._draw_bet(game, safe_right, safe_y, now)
 
-        if self.test_coins_armed:
+        # A machine whose storage is stalling looks, to a player, exactly like
+        # a machine that has crashed. Say which it is -- and say it to the
+        # operator, because the file the card is struggling with is the one
+        # holding the balance.
+        if bank.slow_writes:
+            self._text(
+                f"STORAGE STALLING  {bank.worst_write_ms / 1000:.1f}s",
+                self.font_small,
+                config.COLOR_LOSE,
+                center_x=centre_x,
+                top=safe_y + 8,
+            )
+        elif self.test_coins_armed:
             # Between CREDITS and BET, where nothing else lives.
             self._text(
                 "TEST COIN KEY ARMED",

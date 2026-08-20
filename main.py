@@ -291,8 +291,17 @@ class App:
             # Ordering matters: kill the coil before anything else can fail.
             self.hardware.set_solenoid(False)
             self.hardware.close()
+            # Under PERSIST_MODE = "memory" this is the only write there is.
+            self.bank.flush()
             self.ui.quit()
             self.profiler.summary()
+            if self.bank.slow_writes:
+                print(
+                    f"\n[bank] {self.bank.slow_writes} slow write(s) this run, "
+                    f"worst {self.bank.worst_write_ms:.0f}ms. The storage, not "
+                    f"the game, is what stopped the machine.\n"
+                    f"[bank] Check it with: python3 tools/disk_check.py --count 200"
+                )
         return 0
 
     def step(self) -> None:

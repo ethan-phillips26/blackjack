@@ -29,12 +29,17 @@ STATE_VERSION = 1
 # ---------------------------------------------------------------------------
 
 
-def _atomic_write_json(path: str, payload: dict) -> None:
+def _atomic_write_json(path: str, payload: dict, durable: bool = True) -> None:
     """Write JSON so that `path` is always either the old or the new content.
 
     Never a half-written file: write a sibling temp file, flush it all the way
     down to the platter, then os.replace() (atomic rename on POSIX), then fsync
     the directory so the rename itself survives a power cut.
+
+    `durable=False` keeps the atomic rename -- the file is never torn, and a
+    crash or a reboot still finds the last written balance -- but skips both
+    fsyncs. That is the difference between microseconds and, on a failing SD
+    card, seconds of the game standing still. See config.PERSIST_MODE.
     """
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
@@ -44,10 +49,13 @@ def _atomic_write_json(path: str, payload: dict) -> None:
         json.dump(payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
         handle.flush()
-        os.fsync(handle.fileno())
+        if durable:
+            os.fsync(handle.fileno())
 
     os.replace(tmp_path, path)
 
+    if not durable:
+        return
     dir_fd = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(dir_fd)
@@ -150,15 +158,25 @@ class Bank:
             self.log("CORRUPT", f"unreadable state ({exc}); saved to {quarantine}")
 
     def save(self) -> None:
-        """Persist the balance. BLOCKING, and deliberately so.
+        """Persist the balance, as hard as config.PERSIST_MODE asks for.
 
-        This is the one place the machine trades responsiveness for not losing
-        somebody's money, so it is also the place worth measuring: a card that
-        has started taking seconds per write is a card that is failing, and the
-        first symptom an operator sees is the game freezing after a hand.
+        Under "durable" this BLOCKS on two fsyncs, deliberately: it is the one
+        place the machine trades responsiveness for not losing somebody's
+        money. That also makes it the place worth measuring -- a card taking
+        seconds per write is a card that is failing, and the first symptom is
+        the game freezing after a hand.
+
+        Under "memory" nothing is written until flush() at exit.
         """
+        if config.PERSIST_MODE == "memory":
+            return
+
         started = time.perf_counter()
-        _atomic_write_json(self.state_path, self.state.to_dict())
+        _atomic_write_json(
+            self.state_path,
+            self.state.to_dict(),
+            durable=config.PERSIST_MODE == "durable",
+        )
         elapsed_ms = (time.perf_counter() - started) * 1000.0
 
         if elapsed_ms >= config.SLOW_WRITE_WARN_MS:
@@ -172,6 +190,17 @@ class Bank:
             # Into the ledger too: if this cabinet ever eats a quarter, the
             # audit trail should show the disk was already misbehaving.
             self.log("SLOW_WRITE", f"{elapsed_ms:.0f}ms")
+
+    def flush(self) -> None:
+        """Write the balance out on a clean exit, whatever the mode.
+
+        The one write "memory" mode ever does, and always a durable one: it
+        happens as the machine shuts down, where a pause costs nobody anything.
+        """
+        try:
+            _atomic_write_json(self.state_path, self.state.to_dict(), durable=True)
+        except OSError as exc:
+            print(f"[bank] could not write the balance on exit: {exc}")
 
     def log(self, event: str, detail: str = "") -> None:
         """Append-only audit trail. Advisory: bank.json is authoritative.

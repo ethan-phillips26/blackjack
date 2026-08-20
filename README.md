@@ -398,8 +398,28 @@ exit. The phase names answer the only question that matters here:
   leaves a `SLOW_WRITE` line in the ledger. Seconds-long saves mean the card is
   failing, and the file at risk is the one holding the balance — replace it.
 
-  The fix is faster storage, not different code. The fsync is what stops a
-  power cut eating a player's balance, so it stays. `state/` can live anywhere:
+  **Or stop paying for durability you don't need.** `config.PERSIST_MODE`
+  decides how hard the machine works not to forget the balance, and the
+  expensive part is fsync, not writing:
+
+  | mode | cost per save | survives |
+  | --- | --- | --- |
+  | `durable` | 12.8 ms (and seconds on a failing card) | the plug being pulled mid-write |
+  | `fast` *(default)* | 0.047 ms | quit, crash, reboot — not a power cut mid-write |
+  | `memory` | 0 ms, one write at exit | nothing; a kill loses your credits |
+
+  `fast` is 272× cheaper and **cannot stall**, because nothing waits on the
+  card to commit. It still writes the file atomically, so a restart finds your
+  balance exactly where you left it. That is the right setting for a cabinet in
+  your own home.
+
+  Run `durable` if the machine is ever somewhere the public can feed it real
+  money — it is the only mode in which the interrupted-payout reconciliation
+  means anything. Under the other two, a power cut during a cash-out can lose
+  the owed count.
+
+  If you keep `durable`, the fix is faster storage, not different code, and
+  `state/` can live anywhere:
 
   ```bash
   BLACKJACK_STATE_DIR=/mnt/ssd/blackjack-state python3 main.py --real
