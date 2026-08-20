@@ -122,6 +122,10 @@ class Bank:
         self.state = BankState()
         #: Set by reconcile() so main.py can show the player what happened.
         self.reconcile_message: str | None = None
+        #: Storage health, for the shutdown summary. Not persisted -- these
+        #: describe the card, not the money.
+        self.slow_writes = 0
+        self.worst_write_ms = 0.0
         self.load()
 
     # -- storage -----------------------------------------------------------
@@ -146,7 +150,28 @@ class Bank:
             self.log("CORRUPT", f"unreadable state ({exc}); saved to {quarantine}")
 
     def save(self) -> None:
+        """Persist the balance. BLOCKING, and deliberately so.
+
+        This is the one place the machine trades responsiveness for not losing
+        somebody's money, so it is also the place worth measuring: a card that
+        has started taking seconds per write is a card that is failing, and the
+        first symptom an operator sees is the game freezing after a hand.
+        """
+        started = time.perf_counter()
         _atomic_write_json(self.state_path, self.state.to_dict())
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+        if elapsed_ms >= config.SLOW_WRITE_WARN_MS:
+            self.slow_writes += 1
+            self.worst_write_ms = max(self.worst_write_ms, elapsed_ms)
+            print(
+                f"[bank] SLOW WRITE: {elapsed_ms:.0f}ms to persist the balance "
+                f"-- the storage is stalling the machine",
+                flush=True,
+            )
+            # Into the ledger too: if this cabinet ever eats a quarter, the
+            # audit trail should show the disk was already misbehaving.
+            self.log("SLOW_WRITE", f"{elapsed_ms:.0f}ms")
 
     def log(self, event: str, detail: str = "") -> None:
         """Append-only audit trail. Advisory: bank.json is authoritative.

@@ -312,6 +312,23 @@ ATTRACT_MARQUEE_TEXT = (
 )
 
 # --------------------------------------------------------------------------
+# Storage health
+# --------------------------------------------------------------------------
+
+# Every change to the balance is written atomically: temp file, fsync, rename,
+# fsync the directory. That is two full syncs to the SD card, and it BLOCKS the
+# game loop -- it has to, because a coin that is only in RAM is a coin the
+# machine will forget in a power cut.
+#
+# A healthy card does this in a few milliseconds. When it starts taking
+# hundreds of milliseconds the machine visibly stutters; when it takes seconds,
+# the card is failing and the money on it is at risk. Either way the operator
+# should be told rather than left guessing, so any write slower than this warns
+# on stdout (the journal, under systemd) and leaves a SLOW_WRITE line in the
+# ledger.
+SLOW_WRITE_WARN_MS = 250
+
+# --------------------------------------------------------------------------
 # Misc
 # --------------------------------------------------------------------------
 

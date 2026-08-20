@@ -382,8 +382,31 @@ exit. The phase names answer the only question that matters here:
 ```
 
 - Big **`events`** or **`logic`** worst case → the SD card, in a bank write.
-  Nothing in software will fix it safely; a faster card, or booting from USB
-  SSD, will. Do not move `state/` to a tmpfs — that is the crash safety.
+  Confirm it in ten seconds, without the game in the way:
+
+  ```bash
+  python3 tools/disk_check.py
+  ```
+
+  That times the real atomic write against a plain one, on the real state
+  directory, and tells you whether the fsync is what is stalling you. A healthy
+  card is single-digit milliseconds; an SSD is ~15 ms; a tired card can be
+  **seconds**, and every coin, bet and win pays that cost with the loop stopped.
+
+  The machine now also reports this on its own: any save slower than
+  `SLOW_WRITE_WARN_MS` prints `[bank] SLOW WRITE: …ms` to the journal and
+  leaves a `SLOW_WRITE` line in the ledger. Seconds-long saves mean the card is
+  failing, and the file at risk is the one holding the balance — replace it.
+
+  The fix is faster storage, not different code. The fsync is what stops a
+  power cut eating a player's balance, so it stays. `state/` can live anywhere:
+
+  ```bash
+  BLACKJACK_STATE_DIR=/mnt/ssd/blackjack-state python3 main.py --real
+  ```
+
+  Do **not** point that at a tmpfs. It would be instant, and it would lose
+  somebody's money the first time the plug was pulled.
 - Big **`draw`** → graphics. `draw` excludes the frame limiter's sleep, so a
   healthy machine shows a small number here and spends the rest idle. If it is
   large, try `--windowed`, drop `FPS`, or set `ANIMATIONS_ENABLED = False`.
