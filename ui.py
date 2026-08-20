@@ -331,6 +331,7 @@ class UI:
         self.offset_x = config.IMAGE_OFFSET_X
         self.offset_y = config.IMAGE_OFFSET_Y
         self.display: pygame.Surface  # set by _make_screen
+        self.stretch = False  # ...as is this
         self.screen = self._make_screen(fullscreen)
         self.clock = pygame.time.Clock()
         self.show_safe_guide = config.SHOW_SAFE_AREA_GUIDE
@@ -345,7 +346,8 @@ class UI:
         # the tube. Guessing between them from across a room is hopeless.
         print(
             f"[ui] display ready: driver={pygame.display.get_driver()} "
-            f"size={self.screen.get_size()} "
+            f"game={self.screen.get_size()} display={self.display.get_size()} "
+            f"{'stretched' if self.stretch else 'direct'} "
             f"{'fullscreen' if fullscreen else 'windowed'} "
             f"DISPLAY={os.environ.get('DISPLAY') or '<unset>'} "
             f"SDL_VIDEODRIVER={os.environ.get('SDL_VIDEODRIVER') or '<unset>'}",
@@ -431,12 +433,21 @@ class UI:
         is the price of being able to centre the picture on a tube that cannot
         centre itself.
         """
-        flags = pygame.SCALED  # letterbox if the framebuffer isn't 640x480
-        if fullscreen:
-            flags |= pygame.FULLSCREEN
         size = (config.SCREEN_WIDTH, config.SCREEN_HEIGHT)
-        self.display = pygame.display.set_mode(size, flags)
-        if self.offset_x or self.offset_y:
+
+        if fullscreen and config.STRETCH_TO_FILL:
+            # Take the whole display at its native mode and do our own scaling.
+            # (0, 0) means "current desktop mode", so we never fight the CRT
+            # over what resolution it is willing to show.
+            self.display = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        else:
+            flags = pygame.SCALED  # letterbox if the framebuffer isn't 640x480
+            if fullscreen:
+                flags |= pygame.FULLSCREEN
+            self.display = pygame.display.set_mode(size, flags)
+
+        self.stretch = self.display.get_size() != size
+        if self.stretch or self.offset_x or self.offset_y:
             return pygame.Surface(size)
         return self.display
 
@@ -444,7 +455,7 @@ class UI:
         """Swap between drawing direct and drawing through a canvas, after the
         offset changes from nothing to something or back."""
         size = (config.SCREEN_WIDTH, config.SCREEN_HEIGHT)
-        needs_canvas = bool(self.offset_x or self.offset_y)
+        needs_canvas = bool(self.offset_x or self.offset_y or self.stretch)
         if needs_canvas and self.screen is self.display:
             self.screen = pygame.Surface(size)
         elif not needs_canvas and self.screen is not self.display:
@@ -468,9 +479,23 @@ class UI:
         )
 
     def _present(self) -> None:
-        """Push the finished frame to the display, offset if need be."""
-        if self.screen is not self.display:
-            self.display.fill(config.COLOR_BG)
+        """Push the finished frame to the display: scaled, offset, or neither."""
+        if self.screen is self.display:
+            pygame.display.flip()  # drawing straight to it; nothing to do
+            return
+
+        self.display.fill(config.COLOR_BG)
+        if self.stretch:
+            target = self.display.get_size()
+            frame = pygame.transform.scale(self.screen, target)
+            # The nudge is in 640x480 units, so scale it along with everything
+            # else or it would move by a different amount than it reads.
+            scale_x = target[0] / config.SCREEN_WIDTH
+            scale_y = target[1] / config.SCREEN_HEIGHT
+            self.display.blit(
+                frame, (int(self.offset_x * scale_x), int(self.offset_y * scale_y))
+            )
+        else:
             self.display.blit(self.screen, (self.offset_x, self.offset_y))
         pygame.display.flip()
 

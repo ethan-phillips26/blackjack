@@ -70,6 +70,22 @@ SHOW_SAFE_AREA_GUIDE = False
 IMAGE_OFFSET_X = 0
 IMAGE_OFFSET_Y = 0
 
+# --- Filling the screen ----------------------------------------------------
+# pygame.SCALED preserves SQUARE-pixel aspect, so a 640x480 game on a 720x480
+# composite mode gets black pillarbox bars down both sides. Those bars are
+# drawn by SDL outside our surface, so IMAGE_OFFSET_* cannot move them and the
+# felt colour never reaches them.
+#
+# That is also simply wrong for composite. NTSC 720x480 is a 4:3 picture made
+# of NON-square pixels: stretching 640x480 across the full 720 is what makes it
+# come out with the right geometry on the tube. Preserving square aspect both
+# wastes the sides and squashes the image.
+#
+# True  = own the whole display and scale our 640x480 onto it. No black bars.
+# False = the old pygame.SCALED behaviour, letterboxed, square pixels.
+# Only applies fullscreen; a 640x480 window on a PC needs no scaling either way.
+STRETCH_TO_FILL = True
+
 # How far one arrow-key press moves it.
 IMAGE_NUDGE_STEP = 2
 

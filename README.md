@@ -335,6 +335,29 @@ Press `G` to draw the boundary in magenta and tune
 just inside your tube's visible area. Every set is different; this is a per-TV
 adjustment, not a set-and-forget one.
 
+### Black bars down the sides
+
+`pygame.SCALED` preserves **square-pixel** aspect, so a 640×480 game on the
+Pi's 720×480 composite mode gets pillarboxed with black bars. Those bars belong
+to SDL, not to the game — nothing in the palette is black, `IMAGE_OFFSET_*`
+cannot move them, and the felt colour never reaches them.
+
+Preserving square aspect is also simply wrong for composite. NTSC 720×480 is a
+4:3 picture made of **non-square** pixels: stretching 640×480 across the full
+720 is what gives the right geometry on the tube. `STRETCH_TO_FILL = True` (the
+default) takes the whole display at its native mode and scales onto it, so
+there are no bars and the picture is not squashed.
+
+The boot log tells you which you are getting:
+
+```
+[ui] display ready: driver=x11 game=(640, 480) display=(720, 480) stretched fullscreen
+```
+
+`display=` is the mode SDL actually got. If that is not what your TV is doing,
+the problem is upstream in `config.txt`, not here. Set `STRETCH_TO_FILL = False`
+for the old letterboxed behaviour with square pixels.
+
 ### Centring the picture
 
 CRTs are not centred the way a monitor is — the deflection circuitry drifts
