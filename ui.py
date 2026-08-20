@@ -71,32 +71,57 @@ DEAL_PRIORITY = {"player": 0, "dealer": 1}
 _sounds: dict[str, "pygame.mixer.Sound"] = {}
 
 
-def init_audio() -> str:
-    """Open the mixer and render audio.py's library into it. Returns a status
-    line for the boot log; never raises.
+def request_audio_format() -> None:
+    """Ask for our mixer format BEFORE pygame.init(). Must be called first.
 
-    Sound is the one subsystem here that is allowed to simply not exist. A Pi
-    OS Lite install with no audio configured, a busy ALSA device, a cabinet
-    with no speaker -- all of them end up here returning a reason, and the game
-    plays on in silence rather than refusing to start over a jingle.
+    This is the whole trick, and getting it wrong cost a black screen on a real
+    cabinet. The tempting version is to let pygame.init() open the mixer however
+    it likes, then quit() and re-init() it with the settings we want. On a PC
+    that works. On a Pi driving audio out of the AV jack it can HANG: the device
+    has not finished releasing when the reopen asks for it, ALSA blocks, and
+    because a hang raises nothing there is no exception to catch. The game never
+    reaches its main loop and the television just stays dark.
+
+    pre_init() instead records the format we want and lets pygame.init() open
+    the device exactly once. pygame.init() does not raise when the mixer fails --
+    it reports failures in its return value -- so a cabinet with no working
+    audio silently gets no mixer, and everything downstream already copes.
     """
     if not config.SOUND_ENABLED:
-        return "sound disabled in config"
+        return
     try:
-        if pygame.mixer.get_init():
-            pygame.mixer.quit()  # reopen on our terms, not pygame.init()'s
-        pygame.mixer.init(
+        pygame.mixer.pre_init(
             frequency=audio.SAMPLE_RATE,
             size=-16,  # signed 16-bit, matching audio.to_pcm()
             channels=1,  # mono: it is a television speaker
             buffer=config.SOUND_BUFFER,
         )
+    except Exception:  # pragma: no cover - pre_init is not supposed to fail
+        pass
+
+
+def init_audio() -> str:
+    """Render audio.py's library into whatever mixer pygame.init() managed to
+    open. Returns a status line for the boot log; never raises, never blocks.
+
+    Sound is the one subsystem here allowed to simply not exist. No audio
+    configured, a busy device, a cabinet with no speaker -- all of them end up
+    here reporting a reason, and the game plays on in silence rather than
+    refusing to start over a jingle.
+    """
+    if not config.SOUND_ENABLED:
+        return "sound disabled in config"
+    if not pygame.mixer.get_init():
+        # pygame.init() could not open a device. Nothing to do and nothing to
+        # fix: do NOT try to open one here, that is what used to hang.
+        return "no audio device; running silent"
+    try:
         pygame.mixer.set_num_channels(config.SOUND_CHANNELS)
         for name, pcm in audio.build_library(config.SOUND_VOLUME).items():
             _sounds[name] = pygame.mixer.Sound(buffer=pcm)
-    except (pygame.error, ValueError) as exc:
+    except Exception as exc:  # a jingle may not take the machine down
         _sounds.clear()
-        return f"no audio ({exc}); running silent"
+        return f"could not build sounds ({exc}); running silent"
     return f"{len(_sounds)} sounds synthesised"
 
 
@@ -167,6 +192,8 @@ class CardSprite:
 
 class UI:
     def __init__(self, fullscreen: bool = False) -> None:
+        # Order matters: the mixer format has to be requested before init.
+        request_audio_format()
         pygame.init()
         pygame.display.set_caption("Blackjack")
         pygame.mouse.set_visible(False)  # it's a cabinet, there's no mouse
@@ -175,8 +202,12 @@ class UI:
         self.screen = self._make_screen(fullscreen)
         self.clock = pygame.time.Clock()
         self.show_safe_guide = config.SHOW_SAFE_AREA_GUIDE
+        # Printed before anything optional runs, so that if the machine ever
+        # does hang during startup again, the log says whether it got a screen.
+        print(f"[ui] display ready: {self.screen.get_size()} "
+              f"{'fullscreen' if fullscreen else 'windowed'}", flush=True)
 
-        print(f"[audio] {init_audio()}")
+        print(f"[audio] {init_audio()}", flush=True)
 
         self.font_huge = pygame.font.Font(config.FONT_PATH, config.FONT_SIZE_HUGE)
         self.font_large = pygame.font.Font(config.FONT_PATH, config.FONT_SIZE_LARGE)

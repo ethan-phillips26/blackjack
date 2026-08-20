@@ -49,6 +49,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--seed", type=int, default=None, help="deterministic shoe, for testing"
     )
     parser.add_argument(
+        "--no-sound",
+        action="store_true",
+        help="run silent; also the first thing to try if startup ever hangs",
+    )
+    parser.add_argument(
         "--profile",
         action="store_true",
         help="report where each frame's time goes; names slow frames as they happen",
@@ -239,6 +244,9 @@ class App:
         self.result_credited = False
         self.last_input_ms = now_ms()
         self.attract = False
+
+        if getattr(args, "no_sound", False):
+            config.SOUND_ENABLED = False
 
         # ui.py is imported late so that --help and a broken pygame install
         # don't stop main.py from being importable.

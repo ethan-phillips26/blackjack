@@ -156,6 +156,59 @@ class TestEveryCallSiteHasASound(unittest.TestCase):
         self.assertEqual(App._result_sound(Outcome.PLAYER_BUST), "lose")
 
 
+class TestStartupCannotHang(unittest.TestCase):
+    """Regression guard for a black screen on a real cabinet.
+
+    init_audio() used to quit the mixer pygame.init() had opened and then
+    reopen it with our settings. On a Pi driving audio out of the AV jack that
+    reopen can block inside ALSA -- and a hang raises nothing, so the except
+    clause never fired, the main loop was never reached, and the television
+    just stayed dark.
+
+    The format is now requested with pre_init() BEFORE pygame.init(), so the
+    device is opened exactly once and never reopened. Checked at the source
+    level because importing pygame here would break test_game's assertion that
+    the pure modules never pull it in.
+    """
+
+    def ui_function(self, name: str) -> str:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "ui.py"), encoding="utf-8") as handle:
+            source = handle.read()
+        start = source.index(f"def {name}(")
+        rest = source[start:]
+        # up to the next top-level def/class
+        end = re.search(r"\n(?:def |class )", rest)
+        return rest[: end.start()] if end else rest
+
+    def test_init_audio_never_opens_a_device(self):
+        body = self.ui_function("init_audio")
+        self.assertNotIn("mixer.init(", body)
+        self.assertNotIn("mixer.quit(", body)
+
+    def test_init_audio_checks_the_mixer_is_already_up(self):
+        self.assertIn("mixer.get_init()", self.ui_function("init_audio"))
+
+    def test_the_format_is_requested_with_pre_init(self):
+        self.assertIn("mixer.pre_init(", self.ui_function("request_audio_format"))
+
+    def test_pre_init_runs_before_pygame_init(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "ui.py"), encoding="utf-8") as handle:
+            source = handle.read()
+        constructor = source[source.index("def __init__(self, fullscreen"):]
+        self.assertLess(
+            constructor.index("request_audio_format()"),
+            constructor.index("pygame.init()"),
+            "the mixer format must be requested before pygame.init()",
+        )
+
+    def test_sound_failures_are_caught_broadly(self):
+        """A jingle must never be able to take the machine down, whatever the
+        mixer raises -- not just the two exception types we thought of."""
+        self.assertIn("except Exception", self.ui_function("init_audio"))
+
+
 class TestNoGuiDependencies(unittest.TestCase):
     def test_audio_is_pygame_free(self):
         """ui.py owns the mixer; this module only makes numbers."""

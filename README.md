@@ -271,14 +271,30 @@ on in silence:
 [audio] sound disabled in config
 ```
 
-Turn it off with `SOUND_ENABLED = False`; tune with `SOUND_VOLUME`, and raise
-`SOUND_BUFFER` to 1024 if a busy Pi crackles.
+Turn it off with `SOUND_ENABLED = False` or `--no-sound`; tune with
+`SOUND_VOLUME`, and raise `SOUND_BUFFER` to 1024 if a busy Pi crackles.
+
+> **If the game ever starts and nothing appears on the screen, try
+> `--no-sound` first.** The mixer format is requested with `pre_init()` before
+> `pygame.init()` precisely so the audio device is opened once and never
+> reopened: quitting and reopening it can block inside ALSA on a Pi, and a hang
+> raises nothing, so there is no exception to catch and no main loop to reach —
+> the television just stays dark. The boot log now says how far it got:
+>
+> ```
+> [ui] display ready: (640, 480) fullscreen
+> [audio] 12 sounds synthesised
+> ```
+>
+> A `[ui]` line with no `[audio]` line after it means startup died between the
+> two.
 
 On the Pi the audio comes out of the **same 4-pole AV jack as the composite
-video** (tip = left, ring 1 = right), so the television plays it. Note that
-`blackjack.service` used to force `SDL_AUDIODRIVER=dummy`; it now selects ALSA
-and adds the `audio` group, with the dummy line left commented for silencing a
-cabinet at the system level.
+video** (tip = left, ring 1 = right), so the television plays it.
+`blackjack.service` used to force `SDL_AUDIODRIVER=dummy`; it now leaves the
+driver unset — pinning it to `alsa` removes SDL's ability to fall back, and a
+cabinet with no working audio should end up silent, never stuck — and adds the
+`audio` group for `/dev/snd/*`.
 
 ---
 
