@@ -195,6 +195,13 @@ class App:
         #: When the finished hand's banner went up. 0 = waiting for the cards
         #: to stop moving first, so the result never outruns the deal.
         self.settled_at_ms = 0
+        #: When the hand was DECIDED, which is earlier and is what input timing
+        #: keys off. Deliberately not the same clock as the banner: what the
+        #: renderer is still finishing must never decide whether a button works.
+        self.settled_decided_ms = 0
+        #: A BET/DEAL press that arrived before the result could be skipped.
+        #: Held, not dropped -- see handle_button.
+        self.pending_button: str | None = None
         self.result_credited = False
         self.last_input_ms = now_ms()
         self.attract = False
@@ -331,14 +338,19 @@ class App:
     def result_is_skippable(self, now: int) -> bool:
         """May a BET/DEAL press clear the result screen yet?
 
-        Guards against a press that was queued while the loop was blocked in a
-        bank write: it lands the moment the machine catches up and would wipe
-        the result the player never got to see. Also covers the settle frames
-        of a natural, where the banner is still waiting on the deal animation.
+        Measured from when the hand was DECIDED, not from when the banner
+        finished sliding in. Tying this to the animation meant the machine
+        ignored the player for as long as a card was still moving -- on a Pi,
+        two whole seconds of pressing DEAL and nothing happening, which reads
+        as a crash rather than as a pause.
+
+        The remaining grace exists for one specific case: a press queued while
+        the loop was blocked in a bank write gets delivered the instant the
+        machine catches up, and would wipe a result nobody had seen yet.
         """
-        if self.settled_at_ms == 0:
-            return False  # cards still landing; the banner is not even up
-        return now - self.settled_at_ms >= config.RESULT_SKIP_GRACE_MS
+        if self.settled_decided_ms == 0:
+            return False
+        return now - self.settled_decided_ms >= config.RESULT_SKIP_GRACE_MS
 
     def handle_button(self, button: str, now: int) -> None:
         game = self.game
@@ -354,6 +366,7 @@ class App:
         if button == config.BTN_BET:
             if game.phase is Phase.SETTLED:
                 if not self.result_is_skippable(now):
+                    self.pending_button = button
                     return
                 self.clear_hand()
             if game.phase is Phase.BETTING:
@@ -362,8 +375,11 @@ class App:
         elif button == config.BTN_DEAL:
             if game.phase is Phase.SETTLED:
                 # Let an impatient player skip the result -- but only once it
-                # has actually been on screen (see result_is_skippable).
+                # has actually been on screen (see result_is_skippable). A
+                # press that is too early is HELD, never dropped: a button that
+                # does nothing at all is what makes a cabinet feel broken.
                 if not self.result_is_skippable(now):
+                    self.pending_button = button
                     return
                 self.clear_hand()
             if game.can_deal(self.bank.balance_quarters):
@@ -442,6 +458,15 @@ class App:
                 game.dealer_step()
                 self.dealer_next_ms = now + config.DEALER_STEP_MS
 
+        if (
+            self.pending_button is not None
+            and game.phase is Phase.SETTLED
+            and self.result_is_skippable(now)
+        ):
+            held, self.pending_button = self.pending_button, None
+            self.handle_button(held, now)
+            return  # the replayed press has already moved the hand on
+
         if game.phase is Phase.SETTLED and game.result is not None:
             if not self.result_credited:
                 # Winnings go to the CREDIT METER, not to the hopper. Coins only
@@ -451,6 +476,7 @@ class App:
                 self.bank.credit(game.result.returned_quarters, "SETTLE")
                 self.result_credited = True
                 self.settled_at_ms = 0
+                self.settled_decided_ms = now
                 self.play_sound("win" if game.result.outcome.player_won else "lose")
             elif self.settled_at_ms == 0:
                 if not self.ui.is_dealing():
@@ -463,6 +489,8 @@ class App:
         self.game.clamp_bet(self.bank.balance_quarters)
         self.result_credited = False
         self.settled_at_ms = 0
+        self.settled_decided_ms = 0
+        self.pending_button = None
 
 
 def main(argv: list[str] | None = None) -> int:

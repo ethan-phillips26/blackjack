@@ -341,6 +341,31 @@ banner goes up, so a keypress queued during a stall is not delivered as "skip".
 Deliberately skipping still works a beat later. Set it to 0 for the old
 always-skippable behaviour.
 
+**The tail of a round.** "It freezes after a hand" is usually not a freeze at
+all — it is the fixed sequence between standing and being able to deal again.
+Measured end to end, with a dealer who draws twice:
+
+| | |
+| --- | --- |
+| STAND pressed | 0.00s |
+| dealer finishes drawing, result decided | 1.36s |
+| BET/DEAL accepted again | 1.95s |
+| back to the betting screen | 4.40s |
+
+The two long stretches are both config, not bugs: `DEALER_STEP_MS` (650 ms per
+dealer card) and `RESULT_DISPLAY_SECONDS` (3.0 s). Halving them roughly halves
+the tail. What was a genuine fault is the middle row — the machine used to
+ignore BET and DEAL until every card had stopped moving, which on a Pi is
+seconds of pressing a button and getting nothing, and reads as a crash rather
+than a pause. Two changes:
+
+- Input timing is now measured from when the hand was **decided**, not from
+  when the banner finished animating in. What the renderer is still finishing
+  no longer decides whether a button works.
+- A press that is still too early is **held, not dropped**, and acted on the
+  moment it becomes legal. Press DEAL whenever you like; the machine always
+  responds, at worst `RESULT_SKIP_GRACE_MS` later.
+
 **Measure yours before changing anything:**
 
 ```bash
