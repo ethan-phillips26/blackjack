@@ -62,6 +62,7 @@ either way with `--mock` / `--real`. Other flags: `--fullscreen`, `--windowed`,
 | `C` | CASH OUT — dispenses the whole balance (and doubles as jam retry) |
 | `F11` | fullscreen |
 | `G` | draw the overscan-safe-area box |
+| arrows | nudge the picture, for centring on a CRT |
 | `Esc` | quit |
 
 **These all work on the Pi too**, alongside the arcade buttons — see
@@ -334,6 +335,30 @@ Press `G` to draw the boundary in magenta and tune
 just inside your tube's visible area. Every set is different; this is a per-TV
 adjustment, not a set-and-forget one.
 
+### Centring the picture
+
+CRTs are not centred the way a monitor is — the deflection circuitry drifts
+with age and temperature, and most consumer sets have no horizontal position
+control outside a service menu. If the game sits slightly off to one side,
+nudge it with the **arrow keys** while it is running:
+
+```
+[ui] image offset now (-6, 0) -- put this in config.py:  IMAGE_OFFSET_X = -6  IMAGE_OFFSET_Y = 0
+```
+
+Copy those numbers into `IMAGE_OFFSET_X` / `IMAGE_OFFSET_Y` in `config.py` to
+make it permanent. `IMAGE_NUDGE_STEP` sets how far one press moves it.
+
+This is a per-television adjustment like the safe-area inset, and unlike the
+`overscan_*` settings in the Pi's `config.txt` it takes effect immediately with
+no reboot — which is what makes it practical to dial in by eye. The vacated
+edge is filled with the felt colour rather than black, so a small correction is
+invisible.
+
+Zero on both axes costs nothing: the game draws straight onto the display
+surface and no copy happens. A non-zero offset adds one full-surface blit per
+frame, which is the price of centring a tube that cannot centre itself.
+
 The palette and fonts are chosen for composite too: no pure white or black
 (they bloom and smear), desaturated red instead of saturated red (chroma crawl),
 big bold type, and a 3 px minimum stroke — 1 px lines shimmer on an interlaced
@@ -381,6 +406,89 @@ Two things actually get in the way, and neither is this program:
 If you are running under the desktop rather than straight to the framebuffer,
 none of that applies — it is an ordinary window and just needs focus.
 
+### Running under X (optional)
+
+Pi OS Lite has no X server at all. You do not need one — see the note at the
+end of this section — but if you want it, this is the minimal kiosk setup.
+
+```bash
+sudo apt install --no-install-recommends xserver-xorg xinit x11-xserver-utils
+```
+
+Then make X launch the game as its only client, with no window manager:
+
+```bash
+cat > ~/.xinitrc <<'EOF'
+#!/bin/sh
+# A cabinet should never blank, dim, or sleep.
+xset s off
+xset s noblank
+xset -dpms
+unclutter -idle 0 &     # hide X's mouse pointer (apt install unclutter)
+exec python3 "$HOME/blackjack/main.py" --real --fullscreen
+EOF
+chmod +x ~/.xinitrc
+startx
+```
+
+`startx` runs `~/.xinitrc` and exits when the game does, so quitting the game
+drops you back to the console.
+
+**If that gives you a small terminal in the corner instead**, X used its
+default session (a bare `xterm`), which means `~/.xinitrc` was not read —
+`startx` only uses it from the home of the user actually running it. The form
+below does not depend on that file at all, and is the one to reach for:
+
+```bash
+startx /usr/bin/python3 "$HOME/blackjack/main.py" --real --fullscreen
+```
+
+(Running the game by hand inside that xterm also works, and for the same
+reason: inside X, `DISPLAY` is set, so SDL finds x11 instead of falling back to
+an invisible driver. It just leaves you with an xterm behind the game.)
+
+To debug `~/.xinitrc` if you would rather use it:
+
+```bash
+whoami                 # must match the home you wrote the file into
+ls -l ~/.xinitrc       # must exist
+head -3 ~/.xinitrc     # must be what you meant
+```
+
+The usual causes are `sudo startx` (which reads `/root/.xinitrc`), writing the
+file only after testing `startx`, or passing a client argument to `startx` —
+which makes it ignore `~/.xinitrc` entirely.
+
+**The mouse pointer** is X's, not the game's. `ui.py` hides the cursor inside
+its own window, but with no window manager the pointer still shows over the
+root window. `sudo apt install --no-install-recommends unclutter`, then run
+`unclutter -idle 0 &` before the game (as in the `.xinitrc` above).
+
+To come up on the CRT at power-on, enable console autologin
+(`sudo raspi-config` → System Options → Boot / Auto Login → Console Autologin)
+and add this to `~/.bash_profile`:
+
+```sh
+if [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
+    exec startx
+fi
+```
+
+Two things that bite here:
+
+- **Start it from a console VT, as yourself.** Debian's `Xwrapper.config`
+  allows only console users to start X, and `sudo startx` puts you straight
+  back into the `XDG_RUNTIME_DIR` / `DISPLAY` problem above.
+- **There is no window manager**, which is fine for one fullscreen program but
+  means nothing will raise, resize, or focus a window for you. If `--fullscreen`
+  misbehaves, try `--windowed` to confirm the window exists at all.
+
+**You probably do not want X.** For a single fullscreen program there is
+nothing for it to manage, and it costs you a software scaling blit between the
+game and the tube — plus it is what blocks SDL from using kmsdrm directly.
+Booting to the console and letting SDL talk to KMS is simpler and faster, and
+is what `blackjack.service` already does.
+
 ### The game runs but the television still shows the terminal
 
 The process is alive, the boot log is scrolling, and the CRT never shows the
@@ -393,10 +501,32 @@ game. Read one line:
 `driver=` is the whole diagnosis, because this is several different faults that
 look identical from across a room:
 
-- **`driver=dummy`** — SDL is rendering into the void. The game runs perfectly
-  and displays nowhere. Something has `SDL_VIDEODRIVER=dummy` exported (it is
-  what the headless test scripts use). `unset SDL_VIDEODRIVER`. The boot log
-  shouts about this case specifically.
+- **`driver=dummy` or `driver=offscreen`** — SDL is rendering where nobody can
+  see it (`dummy` throws the pixels away, `offscreen` keeps them in a buffer).
+  The game runs perfectly and the screen never changes. Either something has
+  `SDL_VIDEODRIVER` exported — it is what the headless test scripts use — or
+  **SDL fell back to it because no real driver would open**, which is the
+  common case and the one that looks like a hardware fault. The boot log
+  distinguishes the two and, for the fallback, prints the actual reasons:
+
+  ```
+  [ui] WARNING: video driver 'offscreen' draws to nothing anybody can see.
+  [ui]   SDL fell back to it because no real driver would open:
+  [ui]     - DISPLAY is unset, so SDL cannot use X11. ...
+  [ui]     - An X server is running. While X owns the display, SDL cannot take
+  [ui]       it over with kmsdrm ...
+  ```
+
+  Two classic ways to produce it, neither of which looks like a display fault:
+
+  1. **`sudo`.** It strips `DISPLAY` and `XDG_RUNTIME_DIR`, which disables X11
+     and Wayland in one go — the tell is `XDG_RUNTIME_DIR is invalid or not
+     set`. You do not need root for this machine: put your user in the `gpio`,
+     `video`, `render` and `input` groups and run it as yourself. If you must,
+     `sudo -E` preserves the environment.
+  2. **No `DISPLAY` while X is running**, e.g. from a bare VT or over SSH.
+     X11 is unreachable and kmsdrm is blocked (X owns the display), so SDL runs
+     out of options and renders into a buffer.
 - **`driver=kmsdrm` or `fbcon` while X is running** — the game is drawing
   straight to the framebuffer while the X server owns the display, so the tube
   keeps showing X. This is what you get by SSHing in and running the game with

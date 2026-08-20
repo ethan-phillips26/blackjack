@@ -54,6 +54,25 @@ SAFE_RECT = (SAFE_X, SAFE_Y, SCREEN_WIDTH - 2 * SAFE_X, SCREEN_HEIGHT - 2 * SAFE
 # Toggled at runtime with the debug key; this is just the startup default.
 SHOW_SAFE_AREA_GUIDE = False
 
+# --- Image position -------------------------------------------------------
+# Nudges the whole picture, in 640x480 pixels. Positive X moves it right,
+# positive Y moves it down.
+#
+# CRTs are not centred the way a monitor is: the deflection circuitry drifts
+# with age and temperature, and most consumer sets have no horizontal position
+# control outside a service menu. This is the same per-television adjustment as
+# the safe-area inset above -- and unlike the overscan_* settings in the Pi's
+# config.txt, it takes effect without a reboot.
+#
+# Tune it live with the arrow keys and copy the numbers it prints back here.
+# Zero on both axes costs nothing at all: the game draws straight to the
+# display and no copy happens.
+IMAGE_OFFSET_X = 0
+IMAGE_OFFSET_Y = 0
+
+# How far one arrow-key press moves it.
+IMAGE_NUDGE_STEP = 2
+
 # --- Composite-safe palette -----------------------------------------------
 # Rules of thumb for composite video:
 #   * Never pure #FFFFFF or #000000 -- clipping blooms and smears.

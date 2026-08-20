@@ -72,6 +72,123 @@ DEAL_PRIORITY = {"player": 0, "dealer": 1}
 _sounds: dict[str, "pygame.mixer.Sound"] = {}
 
 
+#: SDL video drivers that render correctly and show the result to nobody.
+#: "dummy" throws the pixels away; "offscreen" keeps them in a buffer. Either
+#: way the game runs perfectly and the television never changes, which is a
+#: uniquely frustrating way for a cabinet to fail.
+INVISIBLE_DRIVERS = frozenset({"dummy", "offscreen"})
+
+
+def diagnose_display() -> list[str]:
+    """Work out WHY SDL could not open a real display, and say so concretely.
+
+    SDL falls back through its drivers silently and lands on an invisible one
+    only when every real option failed. It never reports which, so this checks
+    the handful of things that actually go wrong on a Pi cabinet.
+    """
+    reasons: list[str] = []
+
+    # Checked first because it causes all the others at once, and because the
+    # reason people reach for sudo -- GPIO access -- has not been necessary for
+    # years. sudo drops DISPLAY and XDG_RUNTIME_DIR, which takes out X11 and
+    # Wayland together and leaves SDL with nothing but an invisible driver.
+    if os.geteuid() == 0 and os.environ.get("SUDO_USER"):
+        reasons.append(
+            "Running under sudo, which strips DISPLAY and XDG_RUNTIME_DIR from "
+            "the environment -- that alone disables both X11 and Wayland. This "
+            "machine does not need root: put your user in the 'gpio', 'video', "
+            "'render' and 'input' groups and run it as yourself. If you really "
+            "must use sudo, 'sudo -E' preserves the environment."
+        )
+
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if not runtime_dir:
+        reasons.append(
+            "XDG_RUNTIME_DIR is not set, so the Wayland driver cannot start "
+            "(this is the 'XDG_RUNTIME_DIR is invalid or not set' message). "
+            "It is normally /run/user/$(id -u), created at login -- it goes "
+            "missing under sudo, in a bare VT, or under a service with no "
+            "session."
+        )
+    elif not os.path.isdir(runtime_dir):
+        reasons.append(
+            f"XDG_RUNTIME_DIR points at {runtime_dir!r}, which does not exist, "
+            f"so the Wayland driver cannot start."
+        )
+
+    if not os.environ.get("DISPLAY"):
+        reasons.append(
+            "DISPLAY is unset, so SDL cannot use X11. If X is running on the "
+            "television, run:  DISPLAY=:0 python3 main.py --real"
+        )
+
+    x_running = any(
+        name.startswith("X") for name in _safe_listdir("/tmp/.X11-unix")
+    )
+    if x_running:
+        reasons.append(
+            "An X server is running. While X owns the display, SDL cannot take "
+            "it over with kmsdrm -- so with no DISPLAY set there is nothing "
+            "left for it to use. Either point at X with DISPLAY=:0, or stop X "
+            "and boot to the console (see the README)."
+        )
+
+    if not os.path.exists("/dev/dri/card0"):
+        reasons.append(
+            "/dev/dri/card0 is missing, so the kmsdrm driver is unavailable "
+            "too. On a Pi that usually means the KMS overlay is not enabled in "
+            "config.txt."
+        )
+    elif not os.access("/dev/dri/card0", os.R_OK | os.W_OK):
+        reasons.append(
+            "/dev/dri/card0 exists but is not readable/writable by this user, "
+            "so kmsdrm cannot open it. Add yourself to the 'video' and "
+            "'render' groups:  sudo usermod -aG video,render $USER"
+        )
+
+    return reasons
+
+
+def _safe_listdir(path: str) -> list[str]:
+    try:
+        return os.listdir(path)
+    except OSError:
+        return []
+
+
+def warn_if_invisible() -> bool:
+    """Shout if the game is about to render somewhere nobody can see.
+
+    Not fatal. An explicitly requested invisible driver is legitimate -- it is
+    how the headless test scripts run -- and even an accidental one should
+    still let the machine come up so the log can be read. But it must never be
+    silent: "runs fine, screen never changes" is otherwise indistinguishable
+    from a dozen unrelated faults.
+    """
+    driver = pygame.display.get_driver()
+    if driver not in INVISIBLE_DRIVERS:
+        return False
+
+    requested = os.environ.get("SDL_VIDEODRIVER")
+    print(
+        f"[ui] WARNING: video driver '{driver}' draws to nothing anybody can "
+        f"see. The game will run perfectly and the screen will never change.",
+        flush=True,
+    )
+    if requested in INVISIBLE_DRIVERS:
+        print(
+            f"[ui]   SDL_VIDEODRIVER={requested} asked for this. Unset it to "
+            f"use a real display.",
+            flush=True,
+        )
+        return True
+
+    print("[ui]   SDL fell back to it because no real driver would open:", flush=True)
+    for reason in diagnose_display() or ["no specific cause found."]:
+        print(f"[ui]     - {reason}", flush=True)
+    return True
+
+
 def request_audio_format() -> None:
     """Ask for our mixer format BEFORE pygame.init(). Must be called first.
 
@@ -191,6 +308,17 @@ class CardSprite:
         return self.flip is not None and not self.flip.done(now_ms)
 
 
+#: Arrow keys -> (dx, dy) for aligning the picture on a CRT. Built lazily on
+#: first use of UI, since pygame constants need pygame imported (it is, above)
+#: but key_code() needs no display.
+_NUDGE_KEYS: dict[int, tuple[int, int]] = {
+    pygame.K_LEFT: (-1, 0),
+    pygame.K_RIGHT: (1, 0),
+    pygame.K_UP: (0, -1),
+    pygame.K_DOWN: (0, 1),
+}
+
+
 class UI:
     def __init__(self, fullscreen: bool = False) -> None:
         # Order matters: the mixer format has to be requested before init.
@@ -200,6 +328,9 @@ class UI:
         pygame.mouse.set_visible(False)  # it's a cabinet, there's no mouse
 
         self.fullscreen = fullscreen
+        self.offset_x = config.IMAGE_OFFSET_X
+        self.offset_y = config.IMAGE_OFFSET_Y
+        self.display: pygame.Surface  # set by _make_screen
         self.screen = self._make_screen(fullscreen)
         self.clock = pygame.time.Clock()
         self.show_safe_guide = config.SHOW_SAFE_AREA_GUIDE
@@ -220,13 +351,7 @@ class UI:
             f"SDL_VIDEODRIVER={os.environ.get('SDL_VIDEODRIVER') or '<unset>'}",
             flush=True,
         )
-        if pygame.display.get_driver() == "dummy":
-            print(
-                "[ui] WARNING: the 'dummy' video driver draws to nothing at "
-                "all. The game will run perfectly and display nowhere. Unset "
-                "SDL_VIDEODRIVER.",
-                flush=True,
-            )
+        warn_if_invisible()
 
         print(f"[audio] {init_audio()}", flush=True)
 
@@ -298,16 +423,60 @@ class UI:
         )
 
     def _make_screen(self, fullscreen: bool) -> pygame.Surface:
+        """Open the display and decide where the game actually draws.
+
+        With no image offset the game draws straight onto the display surface
+        and nothing is copied. With an offset there is an intermediate canvas,
+        blitted across by the offset each frame -- one full-surface blit, which
+        is the price of being able to centre the picture on a tube that cannot
+        centre itself.
+        """
         flags = pygame.SCALED  # letterbox if the framebuffer isn't 640x480
         if fullscreen:
             flags |= pygame.FULLSCREEN
-        return pygame.display.set_mode(
-            (config.SCREEN_WIDTH, config.SCREEN_HEIGHT), flags
+        size = (config.SCREEN_WIDTH, config.SCREEN_HEIGHT)
+        self.display = pygame.display.set_mode(size, flags)
+        if self.offset_x or self.offset_y:
+            return pygame.Surface(size)
+        return self.display
+
+    def _rebuild_target(self) -> None:
+        """Swap between drawing direct and drawing through a canvas, after the
+        offset changes from nothing to something or back."""
+        size = (config.SCREEN_WIDTH, config.SCREEN_HEIGHT)
+        needs_canvas = bool(self.offset_x or self.offset_y)
+        if needs_canvas and self.screen is self.display:
+            self.screen = pygame.Surface(size)
+        elif not needs_canvas and self.screen is not self.display:
+            self.screen = self.display
+
+    def nudge_image(self, dx: int, dy: int) -> None:
+        """Shift the picture, and say where it ended up.
+
+        Printing the numbers is the point: this is a service adjustment made
+        once per television, and it is worthless if it cannot be written back
+        into config.py afterwards.
+        """
+        self.offset_x += dx
+        self.offset_y += dy
+        self._rebuild_target()
+        print(
+            f"[ui] image offset now ({self.offset_x}, {self.offset_y}) -- put "
+            f"this in config.py:  IMAGE_OFFSET_X = {self.offset_x}  "
+            f"IMAGE_OFFSET_Y = {self.offset_y}",
+            flush=True,
         )
+
+    def _present(self) -> None:
+        """Push the finished frame to the display, offset if need be."""
+        if self.screen is not self.display:
+            self.display.fill(config.COLOR_BG)
+            self.display.blit(self.screen, (self.offset_x, self.offset_y))
+        pygame.display.flip()
 
     def toggle_fullscreen(self) -> None:
         self.fullscreen = not self.fullscreen
-        self.screen = self._make_screen(self.fullscreen)
+        self.screen = self._make_screen(self.fullscreen)  # rebuilds .display too
 
     def quit(self) -> None:
         pygame.quit()
@@ -380,6 +549,13 @@ class UI:
                 self.show_safe_guide = not self.show_safe_guide
             elif key == self.key_screenshot:
                 self.save_screenshot()
+            elif key in _NUDGE_KEYS:
+                # Service adjustment. The cabinet's five arcade buttons cannot
+                # reach these, so a keyboard being plugged in is the signal
+                # that somebody is deliberately setting the machine up.
+                dx, dy = _NUDGE_KEYS[key]
+                step = config.IMAGE_NUDGE_STEP
+                self.nudge_image(dx * step, dy * step)
         return True
 
     def save_screenshot(self) -> str | None:
@@ -1024,7 +1200,7 @@ class UI:
                 self.screen, (255, 0, 255), pygame.Rect(*config.SAFE_RECT), width=2
             )
 
-        pygame.display.flip()
+        self._present()
         self.last_draw_ms = (time.perf_counter() - self._draw_started) * 1000.0
         self.clock.tick(config.FPS)
 
@@ -1297,7 +1473,7 @@ class UI:
                 self.screen, (255, 0, 255), pygame.Rect(*config.SAFE_RECT), width=2
             )
 
-        pygame.display.flip()
+        self._present()
         self.last_draw_ms = (time.perf_counter() - self._draw_started) * 1000.0
         self.clock.tick(config.FPS)
 
