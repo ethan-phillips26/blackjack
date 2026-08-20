@@ -86,6 +86,20 @@ IMAGE_OFFSET_Y = 0
 # Only applies fullscreen; a 640x480 window on a PC needs no scaling either way.
 STRETCH_TO_FILL = True
 
+# --- Image size (underscan) -----------------------------------------------
+# Shrinks the whole picture so all of it lands inside what the tube actually
+# shows. 1.0 fills the display; 0.92 leaves a 4% border on every edge.
+#
+# This is the other half of a television service menu: IMAGE_OFFSET_* is
+# position, this is size. Between them you can put the picture anywhere on any
+# CRT without touching the layout, which is the point -- shrinking here keeps
+# every element in the same relative place, whereas widening the safe-area
+# inset re-flows the screen and only helps the things anchored to it.
+#
+# Tune it live with - and = and copy the number it prints back here.
+IMAGE_SCALE = 1.0
+IMAGE_SCALE_STEP = 0.01
+
 # How far one arrow-key press moves it.
 IMAGE_NUDGE_STEP = 2
 

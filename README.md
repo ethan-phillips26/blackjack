@@ -63,6 +63,7 @@ either way with `--mock` / `--real`. Other flags: `--fullscreen`, `--windowed`,
 | `F11` | fullscreen |
 | `G` | draw the overscan-safe-area box |
 | arrows | nudge the picture, for centring on a CRT |
+| `-` `=` | shrink / grow the picture, for overscan |
 | `Esc` | quit |
 
 **These all work on the Pi too**, alongside the arcade buttons — see
@@ -358,19 +359,38 @@ The boot log tells you which you are getting:
 the problem is upstream in `config.txt`, not here. Set `STRETCH_TO_FILL = False`
 for the old letterboxed behaviour with square pixels.
 
-### Centring the picture
+### Fitting the picture to the tube
+
+Between them, two controls do what a television service menu does — position
+and size — and you tune both live, with the game running:
+
+| keys | adjusts | config |
+| --- | --- | --- |
+| arrows | position | `IMAGE_OFFSET_X` / `IMAGE_OFFSET_Y` |
+| `-` and `=` | size (underscan) | `IMAGE_SCALE` |
+
+Every press prints a line you can paste straight into `config.py`:
+
+```
+[ui] picture: offset (-6, 0) scale 0.94  ->  config.py:  IMAGE_OFFSET_X = -6  IMAGE_OFFSET_Y = 0  IMAGE_SCALE = 0.94
+```
+
+**If content is falling off both edges**, that is overscan and the fix is
+`IMAGE_SCALE`, not the offset: shrink until the whole picture is inside what
+the tube shows. 0.90 roughly doubles the margin on every edge. The border is
+filled with the felt colour, not black, so underscanning reads as more table
+rather than as a letterbox.
+
+Shrinking here is deliberately not the same as widening `SAFE_AREA_INSET_*`.
+The inset re-flows the screen and only moves the things anchored to it;
+`IMAGE_SCALE` keeps every element exactly where it was relative to everything
+else, which is what you want when the layout is already right and the tube is
+simply showing less than it is being sent.
 
 CRTs are not centred the way a monitor is — the deflection circuitry drifts
-with age and temperature, and most consumer sets have no horizontal position
-control outside a service menu. If the game sits slightly off to one side,
-nudge it with the **arrow keys** while it is running:
-
-```
-[ui] image offset now (-6, 0) -- put this in config.py:  IMAGE_OFFSET_X = -6  IMAGE_OFFSET_Y = 0
-```
-
-Copy those numbers into `IMAGE_OFFSET_X` / `IMAGE_OFFSET_Y` in `config.py` to
-make it permanent. `IMAGE_NUDGE_STEP` sets how far one press moves it.
+with age and temperature, and most consumer sets have no position control
+outside a service menu. `IMAGE_NUDGE_STEP` and `IMAGE_SCALE_STEP` set how far
+one press moves each.
 
 This is a per-television adjustment like the safe-area inset, and unlike the
 `overscan_*` settings in the Pi's `config.txt` it takes effect immediately with

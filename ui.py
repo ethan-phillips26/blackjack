@@ -330,6 +330,7 @@ class UI:
         self.fullscreen = fullscreen
         self.offset_x = config.IMAGE_OFFSET_X
         self.offset_y = config.IMAGE_OFFSET_Y
+        self.scale = config.IMAGE_SCALE
         self.display: pygame.Surface  # set by _make_screen
         self.stretch = False  # ...as is this
         self.screen = self._make_screen(fullscreen)
@@ -447,7 +448,7 @@ class UI:
             self.display = pygame.display.set_mode(size, flags)
 
         self.stretch = self.display.get_size() != size
-        if self.stretch or self.offset_x or self.offset_y:
+        if self.stretch or self.offset_x or self.offset_y or self.scale != 1.0:
             return pygame.Surface(size)
         return self.display
 
@@ -455,7 +456,9 @@ class UI:
         """Swap between drawing direct and drawing through a canvas, after the
         offset changes from nothing to something or back."""
         size = (config.SCREEN_WIDTH, config.SCREEN_HEIGHT)
-        needs_canvas = bool(self.offset_x or self.offset_y or self.stretch)
+        needs_canvas = bool(
+            self.offset_x or self.offset_y or self.stretch or self.scale != 1.0
+        )
         if needs_canvas and self.screen is self.display:
             self.screen = pygame.Surface(size)
         elif not needs_canvas and self.screen is not self.display:
@@ -470,33 +473,59 @@ class UI:
         """
         self.offset_x += dx
         self.offset_y += dy
+        self._report_geometry()
+
+    def zoom_image(self, delta: float) -> None:
+        """Grow or shrink the picture, for a tube that overscans."""
+        self.scale = max(0.5, min(1.0, round(self.scale + delta, 3)))
+        self._report_geometry()
+
+    def _report_geometry(self) -> None:
+        """Say where the picture ended up, in a form that can be pasted into
+        config.py. A service adjustment you cannot write down is worthless."""
         self._rebuild_target()
         print(
-            f"[ui] image offset now ({self.offset_x}, {self.offset_y}) -- put "
-            f"this in config.py:  IMAGE_OFFSET_X = {self.offset_x}  "
-            f"IMAGE_OFFSET_Y = {self.offset_y}",
+            f"[ui] picture: offset ({self.offset_x}, {self.offset_y}) "
+            f"scale {self.scale:.2f}  ->  config.py:  "
+            f"IMAGE_OFFSET_X = {self.offset_x}  "
+            f"IMAGE_OFFSET_Y = {self.offset_y}  "
+            f"IMAGE_SCALE = {self.scale:.2f}",
             flush=True,
         )
 
     def _present(self) -> None:
-        """Push the finished frame to the display: scaled, offset, or neither."""
+        """Push the finished frame to the display: sized, positioned, or neither.
+
+        One path for every combination of stretch, underscan and nudge, because
+        three separate ones would drift. The border is the felt colour, not
+        black, so underscanning reads as more table rather than as a letterbox.
+        """
         if self.screen is self.display:
             pygame.display.flip()  # drawing straight to it; nothing to do
             return
 
+        display_w, display_h = self.display.get_size()
+        target = (
+            max(1, int(display_w * self.scale)),
+            max(1, int(display_h * self.scale)),
+        )
+        frame = (
+            self.screen
+            if target == self.screen.get_size()
+            else pygame.transform.scale(self.screen, target)
+        )
+
+        # Centre the (possibly shrunk) picture, then apply the nudge in the
+        # game's own 640x480 units so it moves by the amount it reports.
+        x = (display_w - target[0]) // 2 + int(
+            self.offset_x * target[0] / config.SCREEN_WIDTH
+        )
+        y = (display_h - target[1]) // 2 + int(
+            self.offset_y * target[1] / config.SCREEN_HEIGHT
+        )
+
         self.display.fill(config.COLOR_BG)
-        if self.stretch:
-            target = self.display.get_size()
-            frame = pygame.transform.scale(self.screen, target)
-            # The nudge is in 640x480 units, so scale it along with everything
-            # else or it would move by a different amount than it reads.
-            scale_x = target[0] / config.SCREEN_WIDTH
-            scale_y = target[1] / config.SCREEN_HEIGHT
-            self.display.blit(
-                frame, (int(self.offset_x * scale_x), int(self.offset_y * scale_y))
-            )
-        else:
-            self.display.blit(self.screen, (self.offset_x, self.offset_y))
+        self.display.blit(frame, (x, y))
         pygame.display.flip()
 
     def toggle_fullscreen(self) -> None:
@@ -581,6 +610,10 @@ class UI:
                 dx, dy = _NUDGE_KEYS[key]
                 step = config.IMAGE_NUDGE_STEP
                 self.nudge_image(dx * step, dy * step)
+            elif key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                self.zoom_image(-config.IMAGE_SCALE_STEP)
+            elif key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
+                self.zoom_image(config.IMAGE_SCALE_STEP)
         return True
 
     def save_screenshot(self) -> str | None:
