@@ -152,13 +152,15 @@ class RealHardware(Hardware):
         """
         if not config.ALLOW_TEST_COINS_ON_REAL_HARDWARE:
             return
+        # One running stamp across the whole burst. Restarting it per coin
+        # would land every pulse of a multi-coin burst in the same millisecond,
+        # where the debouncer -- correctly -- throws all but the first away.
+        stamp = now_ms()
         for _ in range(count):
-            for pulse in range(config.COIN_PULSES_PER_COIN):
-                # Space the pulses so they clear the debouncer, exactly as the
-                # acceptor's own output would.
-                stamp = now_ms() + pulse * (config.COIN_PULSE_DEBOUNCE_MS + 5)
+            for _pulse in range(config.COIN_PULSES_PER_COIN):
                 with self._lock:
                     coins = self._pulses.pulse(stamp)
+                stamp += config.COIN_PULSE_DEBOUNCE_MS + 5  # clear the debouncer
                 for _coin in range(coins):
                     self._emit(
                         HardwareEvent(

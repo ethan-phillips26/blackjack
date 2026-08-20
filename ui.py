@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import math
 import random
+import time
 from dataclasses import dataclass
 
 import pygame
@@ -155,6 +156,10 @@ class UI:
         self.animate = config.ANIMATIONS_ENABLED
         self.now = 0
         self._first_update = True
+        #: Milliseconds spent DRAWING the last frame, excluding the frame
+        #: limiter's sleep. --profile reports it; nothing else reads it.
+        self.last_draw_ms = 0.0
+        self._draw_started = time.perf_counter()
 
         # Card faces are expensive to draw and there are only 53 of them, so
         # each one is rendered once into a surface and then blitted, scaled, or
@@ -182,6 +187,9 @@ class UI:
         self._banner_ms = 0
         self._banner_lost = False
         self._jam_since_ms = -10_000
+
+        #: Set by main.py when the test-coin key is armed on real hardware.
+        self.test_coins_armed = False
 
         self._attract_active = False
         self._attract_started_ms = 0
@@ -704,6 +712,7 @@ class UI:
     # ------------------------------------------------------------------
 
     def render(self, game: BlackjackGame, bank, payout, notice: str | None = None) -> None:
+        self._draw_started = time.perf_counter()
         if self._attract_active:
             self.render_attract()
             return
@@ -718,6 +727,16 @@ class UI:
         # --- top bar: the two numbers that are always true --------------
         self._draw_credits(safe_x, safe_y, now)
         self._draw_bet(game, safe_right, safe_y, now)
+
+        if self.test_coins_armed:
+            # Between CREDITS and BET, where nothing else lives.
+            self._text(
+                "TEST COIN KEY ARMED",
+                self.font_small,
+                config.COLOR_LOSE,
+                center_x=centre_x,
+                top=safe_y + 8,
+            )
 
         self._draw_shoe(now)
 
@@ -781,6 +800,7 @@ class UI:
             )
 
         pygame.display.flip()
+        self.last_draw_ms = (time.perf_counter() - self._draw_started) * 1000.0
         self.clock.tick(config.FPS)
 
     # -- top bar ----------------------------------------------------------
@@ -1022,6 +1042,7 @@ class UI:
         so it can never hide a player's money behind a pretty screen.
         """
         now = self.now
+        self._draw_started = time.perf_counter()
         self.screen.fill(config.COLOR_BG)
 
         self._draw_attract_pips(now)
@@ -1052,6 +1073,7 @@ class UI:
             )
 
         pygame.display.flip()
+        self.last_draw_ms = (time.perf_counter() - self._draw_started) * 1000.0
         self.clock.tick(config.FPS)
 
     def _draw_attract_pips(self, now: int) -> None:

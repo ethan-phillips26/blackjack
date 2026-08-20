@@ -75,16 +75,19 @@ class MockHardware(Hardware):
 
     def simulate_coin_insert(self, count: int = 1) -> None:
         """Feed real pulses through the real accumulator, not a shortcut."""
+        # One running stamp across the whole burst: restarting it per coin puts
+        # every pulse in the same millisecond, where the debouncer correctly
+        # discards all but the first and count > 1 quietly loses coins.
+        stamp = now_ms()
         for _ in range(count):
-            for pulse in range(config.COIN_PULSES_PER_COIN):
-                # Space pulses far enough apart to clear the debouncer.
-                stamp = now_ms() + pulse * (config.COIN_PULSE_DEBOUNCE_MS + 5)
+            for _pulse in range(config.COIN_PULSES_PER_COIN):
                 coins = self._pulses.pulse(stamp)
                 for _coin in range(coins):
                     self._emit(
                         HardwareEvent(EventType.COIN_INSERTED, timestamp_ms=stamp)
                     )
                     print("[mock] quarter accepted")
+                stamp += config.COIN_PULSE_DEBOUNCE_MS + 5  # clear the debouncer
 
     def simulate_coin_drop(self) -> None:
         self._pending_drop_ms = None  # a manual drop supersedes the armed one

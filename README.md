@@ -313,6 +313,62 @@ Two things actually get in the way, and neither is this program:
 If you are running under the desktop rather than straight to the framebuffer,
 none of that applies — it is an ordinary window and just needs focus.
 
+### Performance: stalls and missing animations
+
+Symptoms on a Pi: a pause after pressing DEAL, a pause before the result
+appears, and the deal animation not showing at all even though hitting and the
+dealer's draw animate fine.
+
+That last detail is the diagnostic one. DEAL and settling are the only two
+moments in a hand that **write to the bank**, and `bank.py` writes atomically —
+`fsync` the temp file, rename, then `fsync` the directory. On an SD card those
+two syncs routinely cost 100–500 ms, and the loop is blocked for all of it.
+Hitting and standing touch no money, which is exactly why they never stutter.
+
+The blocked loop used to poison the animation as well: the frame's clock was
+read at the top of `step()`, so by the time the renderer was handed it, it was
+stale by the length of the write. The deal was scheduled as though it had begun
+before the stall, and at ~700 ms of fsync the whole 725 ms sequence was over
+before a single frame of it was drawn. `main.py` now re-reads the clock after
+the event and payout phases, so the deal always plays from where it really is.
+The stall itself is still there — that is the cost of not losing your money in a
+power cut — but you get the pause and *then* the full animation, rather than a
+pause and a hand that has already appeared.
+
+A press that arrives during the settle write no longer wipes the result screen
+either: `RESULT_SKIP_GRACE_MS` ignores BET/DEAL for the first moments after the
+banner goes up, so a keypress queued during a stall is not delivered as "skip".
+Deliberately skipping still works a beat later. Set it to 0 for the old
+always-skippable behaviour.
+
+**Measure yours before changing anything:**
+
+```bash
+python3 main.py --real --profile
+```
+
+Every frame over twice the budget prints a breakdown, and a summary lands on
+exit. The phase names answer the only question that matters here:
+
+```
+[profile] SLOW FRAME 1: 352.4ms (mostly events)  input 0.0  events 350.4 \
+          payout 0.0  animate 0.0  logic 0.0  draw 1.9
+[profile] frame: median 0.8ms  p95 1.6ms  worst 352.4ms
+```
+
+- Big **`events`** or **`logic`** worst case → the SD card, in a bank write.
+  Nothing in software will fix it safely; a faster card, or booting from USB
+  SSD, will. Do not move `state/` to a tmpfs — that is the crash safety.
+- Big **`draw`** → graphics. `draw` excludes the frame limiter's sleep, so a
+  healthy machine shows a small number here and spends the rest idle. If it is
+  large, try `--windowed`, drop `FPS`, or set `ANIMATIONS_ENABLED = False`.
+
+Under X with no desktop, also check you are not landing on a software renderer:
+`pygame.SCALED` asks SDL to scale a 640×480 buffer to the display, and with no
+GPU-accelerated renderer available that is a full-screen software blit every
+frame. Running the X server at 640×480 so no scaling is needed avoids it
+entirely, and is what a CRT wants anyway.
+
 ### Install
 
 ```bash

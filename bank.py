@@ -66,8 +66,14 @@ class BankState:
     coil_actuating: bool = False
     #: Latched when the dispenser gave up. Cleared by an explicit retry.
     jammed: bool = False
+    #: Quarters that physically entered the acceptor. This is the number the
+    #: cash box is reconciled against, so nothing but a real coin may touch it.
     lifetime_coins_in: int = 0
     lifetime_coins_out: int = 0
+    #: Credits conjured by the test key (see ALLOW_TEST_COINS_ON_REAL_HARDWARE).
+    #: Counted separately precisely BECAUSE they can be cashed out as real
+    #: quarters: if the box comes up short, this is the number that explains it.
+    lifetime_test_coins_in: int = 0
 
     def to_dict(self) -> dict:
         return {"version": STATE_VERSION, **self.__dict__}
@@ -206,13 +212,26 @@ class Bank:
 
     # -- taking money in ---------------------------------------------------
 
-    def insert_quarters(self, count: int = 1) -> int:
+    def insert_quarters(self, count: int = 1, simulated: bool = False) -> int:
+        """Credit accepted quarters.
+
+        `simulated` marks a credit that came from the test key rather than the
+        acceptor. It buys the player exactly the same thing -- a real credit,
+        cashable as a real quarter -- so the balance arithmetic is identical.
+        What differs is the bookkeeping: it is logged as TEST_COIN_IN and kept
+        out of lifetime_coins_in, because that total is what the cash box is
+        counted against. A machine whose ledger claims coins went into a box
+        that is empty is worse than useless in a dispute.
+        """
         if count <= 0:
             return self.balance_quarters
         self.state.balance_quarters += count
-        self.state.lifetime_coins_in += count
+        if simulated:
+            self.state.lifetime_test_coins_in += count
+        else:
+            self.state.lifetime_coins_in += count
         self.save()
-        self.log("COIN_IN", f"+{count}")
+        self.log("TEST_COIN_IN" if simulated else "COIN_IN", f"+{count}")
         return self.balance_quarters
 
     # -- wagering ----------------------------------------------------------

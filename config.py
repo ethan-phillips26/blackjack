@@ -327,6 +327,16 @@ DEALER_BEAT_MS = 180
 # Seconds a finished hand's result stays on screen before returning to idle.
 RESULT_DISPLAY_SECONDS = 3.0
 
+# Pressing BET or DEAL on the result screen skips it, on purpose -- an
+# impatient player should not have to sit through three seconds. But a button
+# press that arrives in the first moments does not mean "skip": on a Pi, saving
+# the settled balance to the SD card can block the loop for a few hundred
+# milliseconds, and any keypress in that window gets delivered the instant it
+# comes back, wiping the result before the player has seen it. Presses this
+# soon after the banner appears are ignored.
+# 0 restores the old always-skippable behaviour.
+RESULT_SKIP_GRACE_MS = 600
+
 # Attract mode after this long with no input (0 disables).
 IDLE_ATTRACT_SECONDS = 30.0
 

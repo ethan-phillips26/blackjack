@@ -14,7 +14,9 @@ coins. Money on the meter always beats a pretty animation.
 from __future__ import annotations
 
 import argparse
+import statistics
 import sys
+import time
 
 import config
 from bank import Bank, PayoutController
@@ -46,8 +48,123 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--seed", type=int, default=None, help="deterministic shoe, for testing"
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="report where each frame's time goes; names slow frames as they happen",
+    )
     parser.set_defaults(backend=None)
     return parser.parse_args(argv)
+
+
+class NullProfiler:
+    """The profiler when --profile is off: every call is a no-op.
+
+    A null object rather than `if self.profiling:` guards, so the measured and
+    unmeasured loops are the same code and the instrumentation cannot change
+    the thing it is measuring.
+    """
+
+    enabled = False
+
+    def begin(self) -> None:
+        pass
+
+    def mark(self, phase: str) -> None:
+        pass
+
+    def end(self, draw_ms: float) -> None:
+        pass
+
+    def summary(self) -> None:
+        pass
+
+
+class FrameProfiler(NullProfiler):
+    """Where the frame actually went. Enabled with --profile.
+
+    Written for one specific question, because it is the question a cabinet
+    always raises: is this slow because of the SD card or because of the
+    graphics? Those land in different phases --
+
+        events  a blocking bank write (placing a bet, crediting a win)
+        logic   the settle write, likewise
+        draw    pygame actually rendering
+
+    -- so one run tells you which, instead of guessing. `draw` excludes the
+    frame limiter's sleep, so a healthy machine shows a small draw number and
+    a large idle remainder, not a flat 33ms.
+    """
+
+    enabled = True
+    PHASES = ("input", "events", "payout", "animate", "logic", "draw")
+
+    def __init__(self, slow_frame_ms: float) -> None:
+        self.slow_frame_ms = slow_frame_ms
+        self.frames = 0
+        self.slow_frames = 0
+        self.started = time.perf_counter()
+        self._phase_start = self.started
+        self._current: dict[str, float] = {}
+        self._samples: dict[str, list[float]] = {p: [] for p in self.PHASES}
+        self._totals: list[float] = []
+
+    def begin(self) -> None:
+        self._phase_start = time.perf_counter()
+        self._current = {}
+
+    def mark(self, phase: str) -> None:
+        now = time.perf_counter()
+        self._current[phase] = (now - self._phase_start) * 1000.0
+        self._phase_start = now
+
+    def end(self, draw_ms: float) -> None:
+        self._current["draw"] = draw_ms
+        self.frames += 1
+        total = sum(self._current.values())
+        self._totals.append(total)
+        for phase, value in self._current.items():
+            if phase in self._samples:
+                self._samples[phase].append(value)
+
+        if total >= self.slow_frame_ms:
+            self.slow_frames += 1
+            worst = max(self._current.items(), key=lambda kv: kv[1])
+            detail = "  ".join(
+                f"{p} {self._current.get(p, 0.0):.1f}" for p in self.PHASES
+            )
+            print(
+                f"[profile] SLOW FRAME {self.frames}: {total:.1f}ms "
+                f"(mostly {worst[0]})  {detail}"
+            )
+
+    @staticmethod
+    def _p95(values: list[float]) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        return ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))]
+
+    def summary(self) -> None:
+        if not self.frames:
+            return
+        elapsed = time.perf_counter() - self.started
+        print(f"\n[profile] {self.frames} frames in {elapsed:.1f}s "
+              f"= {self.frames / max(elapsed, 1e-9):.1f} fps average")
+        print(f"[profile] frame: median {statistics.median(self._totals):.1f}ms  "
+              f"p95 {self._p95(self._totals):.1f}ms  "
+              f"worst {max(self._totals):.1f}ms")
+        for phase in self.PHASES:
+            values = self._samples[phase]
+            if not values or max(values) < 0.05:
+                continue
+            print(f"[profile]   {phase:<8} median {statistics.median(values):6.2f}  "
+                  f"p95 {self._p95(values):6.2f}  worst {max(values):8.2f}")
+        share = 100.0 * self.slow_frames / self.frames
+        print(f"[profile] {self.slow_frames} frames over "
+              f"{self.slow_frame_ms:.0f}ms ({share:.1f}%)")
+        print("[profile] a big 'events' or 'logic' worst-case is the SD card "
+              "(bank.py fsyncs); a big 'draw' is the graphics.")
 
 
 class App:
@@ -65,6 +182,14 @@ class App:
             print(f"[bank] {self.notice}")
         self.notice_until_ms = now_ms() + 8000 if self.notice else 0
 
+        # Twice the frame budget: a frame that misses two refreshes is one a
+        # player can see stutter.
+        self.profiler = (
+            FrameProfiler(slow_frame_ms=2000.0 / config.FPS)
+            if getattr(args, "profile", False)
+            else NullProfiler()
+        )
+
         self.running = True
         self.dealer_next_ms = 0
         #: When the finished hand's banner went up. 0 = waiting for the cards
@@ -81,6 +206,12 @@ class App:
         self.play_sound = play_sound
         fullscreen = self._want_fullscreen(args)
         self.ui = UI(fullscreen=fullscreen)
+
+        # A cabinet where a keystroke mints credits must SAY so, on the screen
+        # in front of whoever is playing it -- not only in a log nobody reads.
+        self.ui.test_coins_armed = (
+            self.hardware.accepts_simulated_input and self.hardware.name != "mock"
+        )
 
         # Boot into the title screen, but only from a genuinely idle machine:
         # an empty meter, nothing owed, and no reconcile message to read.
@@ -120,33 +251,58 @@ class App:
             self.hardware.set_solenoid(False)
             self.hardware.close()
             self.ui.quit()
+            self.profiler.summary()
         return 0
 
     def step(self) -> None:
         now = now_ms()
+        self.profiler.begin()
 
         if not self.ui.process_input(self.hardware):
             self.running = False
             return
+        self.profiler.mark("input")
 
         self.hardware.update(now)
 
         for event in self.hardware.poll_events():
             self.handle_hardware_event(event, now)
+        self.profiler.mark("events")
+
+        # RE-READ THE CLOCK. Everything from here measures elapsed real time,
+        # and the event handling above can BLOCK for a long time: bank.py's
+        # atomic writes fsync the file and then its directory, which on a Pi's
+        # SD card is routinely 100-500ms, and placing a bet does exactly one.
+        # `now` from the top of the frame is stale by that much, and an
+        # animation scheduled from a stale clock is born part-finished -- on a
+        # slow card the whole deal can be over before its first frame is drawn.
+        # This is also why HIT and STAND always looked fine: they touch no money
+        # and so never stall.
+        now = now_ms()
 
         # Drive the dispenser. tick() has already performed any bank writes it
         # needed, so it is safe to energize on its say-so.
         self.hardware.set_solenoid(self.payout.tick(now))
+        self.profiler.mark("payout")
+
+        # ...and again: tick() writes to the bank too, and a coil that is held
+        # on by a stale clock is held on for longer than SOLENOID_ON_MS in real
+        # wall-clock time, which is the one thing that overheats it.
+        now = now_ms()
 
         # Animation state is refreshed BEFORE the hand advances, so that
         # advance_hand() sees this frame's cards when it asks is_dealing().
         self.ui.update(self.game, self.bank, self.payout, now)
         self.update_attract(now)
+        self.profiler.mark("animate")
 
         self.advance_hand(now)
+        self.profiler.mark("logic")
 
         notice = self.notice if now < self.notice_until_ms else None
         self.ui.render(self.game, self.bank, self.payout, notice=notice)
+        # The frame limiter sleeps inside render(); count only the drawing.
+        self.profiler.end(self.ui.last_draw_ms)
 
     # ------------------------------------------------------------------
 
@@ -154,7 +310,9 @@ class App:
         if event.type is EventType.COIN_INSERTED:
             self.last_input_ms = now
             self.attract = False  # a coin always wakes the machine
-            self.bank.insert_quarters(1)
+            # event.simulated distinguishes a test-key credit from a real
+            # quarter. main.py doesn't care which it is -- the bank does.
+            self.bank.insert_quarters(1, simulated=event.simulated)
             self.game.clamp_bet(self.bank.balance_quarters)
             self.play_sound("coin")
         elif event.type is EventType.COIN_DROP_DETECTED:
@@ -170,6 +328,18 @@ class App:
         elif event.type is EventType.QUIT_REQUESTED:
             self.running = False
 
+    def result_is_skippable(self, now: int) -> bool:
+        """May a BET/DEAL press clear the result screen yet?
+
+        Guards against a press that was queued while the loop was blocked in a
+        bank write: it lands the moment the machine catches up and would wipe
+        the result the player never got to see. Also covers the settle frames
+        of a natural, where the banner is still waiting on the deal animation.
+        """
+        if self.settled_at_ms == 0:
+            return False  # cards still landing; the banner is not even up
+        return now - self.settled_at_ms >= config.RESULT_SKIP_GRACE_MS
+
     def handle_button(self, button: str, now: int) -> None:
         game = self.game
 
@@ -183,13 +353,19 @@ class App:
 
         if button == config.BTN_BET:
             if game.phase is Phase.SETTLED:
+                if not self.result_is_skippable(now):
+                    return
                 self.clear_hand()
             if game.phase is Phase.BETTING:
                 game.cycle_bet()
 
         elif button == config.BTN_DEAL:
             if game.phase is Phase.SETTLED:
-                self.clear_hand()  # let an impatient player skip the result
+                # Let an impatient player skip the result -- but only once it
+                # has actually been on screen (see result_is_skippable).
+                if not self.result_is_skippable(now):
+                    return
+                self.clear_hand()
             if game.can_deal(self.bank.balance_quarters):
                 if self.bank.place_bet(game.bet_quarters):
                     game.deal()
