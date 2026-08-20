@@ -27,6 +27,7 @@ credited the instant the hand settles regardless of what is still moving.
 from __future__ import annotations
 
 import math
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -204,8 +205,28 @@ class UI:
         self.show_safe_guide = config.SHOW_SAFE_AREA_GUIDE
         # Printed before anything optional runs, so that if the machine ever
         # does hang during startup again, the log says whether it got a screen.
-        print(f"[ui] display ready: {self.screen.get_size()} "
-              f"{'fullscreen' if fullscreen else 'windowed'}", flush=True)
+        #
+        # The DRIVER is the important half. "the game runs but the television
+        # still shows the terminal" is not one fault but several, and they are
+        # only distinguishable from here: `dummy` renders into the void,
+        # `kmsdrm`/`fbcon` draw straight to a console that may not be the one
+        # currently displayed, and `x11` needs a DISPLAY that is actually on
+        # the tube. Guessing between them from across a room is hopeless.
+        print(
+            f"[ui] display ready: driver={pygame.display.get_driver()} "
+            f"size={self.screen.get_size()} "
+            f"{'fullscreen' if fullscreen else 'windowed'} "
+            f"DISPLAY={os.environ.get('DISPLAY') or '<unset>'} "
+            f"SDL_VIDEODRIVER={os.environ.get('SDL_VIDEODRIVER') or '<unset>'}",
+            flush=True,
+        )
+        if pygame.display.get_driver() == "dummy":
+            print(
+                "[ui] WARNING: the 'dummy' video driver draws to nothing at "
+                "all. The game will run perfectly and display nowhere. Unset "
+                "SDL_VIDEODRIVER.",
+                flush=True,
+            )
 
         print(f"[audio] {init_audio()}", flush=True)
 
@@ -225,6 +246,7 @@ class UI:
         self.key_jam_toggle = pygame.key.key_code(config.KEY_TEST_JAM_TOGGLE)
         self.key_fullscreen = pygame.key.key_code(config.KEY_TOGGLE_FULLSCREEN)
         self.key_safe_guide = pygame.key.key_code(config.KEY_TOGGLE_SAFE_GUIDE)
+        self.key_screenshot = pygame.key.key_code(config.KEY_SCREENSHOT)
         self.key_quit = pygame.key.key_code(config.KEY_QUIT)
 
         # --- animation state ------------------------------------------------
@@ -356,7 +378,36 @@ class UI:
                 self.toggle_fullscreen()
             elif key == self.key_safe_guide:
                 self.show_safe_guide = not self.show_safe_guide
+            elif key == self.key_screenshot:
+                self.save_screenshot()
         return True
+
+    def save_screenshot(self) -> str | None:
+        """Dump the current frame to a PNG next to the state file.
+
+        Deliberately saves the 640x480 surface the game drew, NOT what the
+        television made of it. That is the whole value: comparing this against
+        what the tube shows tells you whether a problem is in the rendering or
+        in the display chain -- overscan, a mode the TV cannot lock onto, a
+        contrast setting -- which you cannot tell apart by squinting at a CRT.
+        """
+        # Second-resolution timestamps collide when the key is pressed twice
+        # in a second, which is exactly what someone does when they are trying
+        # to catch a glitch. Disambiguate rather than silently overwrite.
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(config.STATE_DIR, f"screenshot-{stamp}.png")
+        suffix = 2
+        while os.path.exists(path):
+            path = os.path.join(config.STATE_DIR, f"screenshot-{stamp}-{suffix}.png")
+            suffix += 1
+        try:
+            os.makedirs(config.STATE_DIR, exist_ok=True)
+            pygame.image.save(self.screen, path)
+        except (pygame.error, OSError) as exc:
+            print(f"[ui] could not save screenshot: {exc}", flush=True)
+            return None
+        print(f"[ui] screenshot saved: {path}", flush=True)
+        return path
 
     # ------------------------------------------------------------------
     # Animation state -- called once per frame, BEFORE render

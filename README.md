@@ -381,6 +381,47 @@ Two things actually get in the way, and neither is this program:
 If you are running under the desktop rather than straight to the framebuffer,
 none of that applies — it is an ordinary window and just needs focus.
 
+### The game runs but the television still shows the terminal
+
+The process is alive, the boot log is scrolling, and the CRT never shows the
+game. Read one line:
+
+```
+[ui] display ready: driver=x11 size=(640, 480) fullscreen DISPLAY=:0 SDL_VIDEODRIVER=<unset>
+```
+
+`driver=` is the whole diagnosis, because this is several different faults that
+look identical from across a room:
+
+- **`driver=dummy`** — SDL is rendering into the void. The game runs perfectly
+  and displays nowhere. Something has `SDL_VIDEODRIVER=dummy` exported (it is
+  what the headless test scripts use). `unset SDL_VIDEODRIVER`. The boot log
+  shouts about this case specifically.
+- **`driver=kmsdrm` or `fbcon` while X is running** — the game is drawing
+  straight to the framebuffer while the X server owns the display, so the tube
+  keeps showing X. This is what you get by SSHing in and running the game with
+  no `DISPLAY` set: SDL cannot reach X, so it falls back to the console. Either
+  point it at the X session:
+
+  ```bash
+  DISPLAY=:0 python3 main.py --real
+  ```
+
+  or stop running X at all — see below.
+- **`driver=x11` but still nothing** — with no desktop environment there is no
+  window manager to honour a fullscreen request or raise a window. Try
+  `--windowed` first to confirm a window appears at all.
+
+**For a cabinet, X is the wrong answer.** There is no desktop, no window
+manager, and nothing to manage: X only adds a layer between the game and the
+tube, and a software scaling blit on top. Boot to the console and let SDL talk
+to KMSDRM directly, which is what `blackjack.service` already does
+(`Environment=SDL_VIDEODRIVER=kmsdrm`). `sudo raspi-config` → System Options →
+Boot / Auto Login → Console.
+
+Remember the keyboard note above: on the console SDL reads `/dev/input/*`
+directly, so keys typed into an SSH session never reach the game.
+
 ### Performance: stalls and missing animations
 
 Symptoms on a Pi: a pause after pressing DEAL, a pause before the result

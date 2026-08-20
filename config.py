@@ -246,6 +246,11 @@ KEY_TEST_COIN_DROP = "d"  # simulate the IR beam seeing a coin fall
 KEY_TEST_JAM_TOGGLE = "j"  # stop auto-confirming drops -> force a jam
 KEY_TOGGLE_FULLSCREEN = "f11"
 KEY_TOGGLE_SAFE_GUIDE = "g"
+# Saves exactly what the game is drawing to a PNG. The point of it is a CRT:
+# when the tube shows something odd, this separates "the game is drawing the
+# wrong thing" from "the television is not showing what the game drew", which
+# are not otherwise distinguishable from across a room.
+KEY_SCREENSHOT = "f12"
 KEY_QUIT = "escape"
 
 # Mock dispenser: auto-confirm each drop after this delay, so cash-out "just
