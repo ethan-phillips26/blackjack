@@ -28,6 +28,13 @@ BANK_STATE_PATH = os.path.join(STATE_DIR, "bank.json")
 # bank.json is -- but invaluable when a machine "eats" someone's money.
 LEDGER_PATH = os.path.join(STATE_DIR, "ledger.log")
 
+# Picture position and size, remembered between runs so a television only has
+# to be tuned once. Written on a clean exit only -- never during play. This
+# file is a CACHE, not a source of truth: the IMAGE_OFFSET_* / IMAGE_SCALE
+# constants below remain the documented defaults, and deleting this file is how
+# you reset to them. See display_state.py.
+DISPLAY_STATE_PATH = os.path.join(STATE_DIR, "display.json")
+
 # --------------------------------------------------------------------------
 # Display / CRT
 # --------------------------------------------------------------------------
@@ -64,7 +71,8 @@ SHOW_SAFE_AREA_GUIDE = False
 # the safe-area inset above -- and unlike the overscan_* settings in the Pi's
 # config.txt, it takes effect without a reboot.
 #
-# Tune it live with the arrow keys and copy the numbers it prints back here.
+# Tune it live with the arrow keys; the machine remembers where you left it.
+# The numbers are printed too, for baking into a second cabinet's config.
 # Zero on both axes costs nothing at all: the game draws straight to the
 # display and no copy happens.
 IMAGE_OFFSET_X = 0
@@ -96,9 +104,17 @@ STRETCH_TO_FILL = True
 # every element in the same relative place, whereas widening the safe-area
 # inset re-flows the screen and only helps the things anchored to it.
 #
-# Tune it live with - and = and copy the number it prints back here.
+# Tune it live with - and = ; the machine remembers where you left it.
 IMAGE_SCALE = 1.0
 IMAGE_SCALE_STEP = 0.01
+
+# How far the live adjustment may be pushed. 1.0 is "fill the display" -- there
+# is nothing beyond it to reach, since the game cannot draw outside the screen
+# it was given. The lower bound just stops a held key shrinking the picture to
+# an unreadable postage stamp. Both bounds are also what a hand-edited
+# state/display.json gets clamped to on load.
+IMAGE_SCALE_MIN = 0.5
+IMAGE_SCALE_MAX = 1.0
 
 # How far one arrow-key press moves it.
 IMAGE_NUDGE_STEP = 2

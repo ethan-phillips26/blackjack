@@ -48,6 +48,7 @@ import pygame
 import anim
 import audio
 import config
+import display_state
 from anim import RollingCounter, Tween
 from cards import Card
 from game import BlackjackGame, Phase, hand_value
@@ -358,9 +359,12 @@ class UI:
         pygame.mouse.set_visible(False)  # it's a cabinet, there's no mouse
 
         self.fullscreen = fullscreen
-        self.offset_x = config.IMAGE_OFFSET_X
-        self.offset_y = config.IMAGE_OFFSET_Y
-        self.scale = config.IMAGE_SCALE
+        # config.py holds the defaults; state/display.json overrides them with
+        # whatever this television was last tuned to. Delete that file to reset.
+        self._saved_geometry = display_state.load()
+        self.offset_x = self._saved_geometry.offset_x
+        self.offset_y = self._saved_geometry.offset_y
+        self.scale = self._saved_geometry.scale
         self.display: pygame.Surface  # set by _make_screen
         self.stretch = False  # ...as is this
         self.screen = self._make_screen(fullscreen)
@@ -502,9 +506,9 @@ class UI:
     def nudge_image(self, dx: int, dy: int) -> None:
         """Shift the picture, and say where it ended up.
 
-        Printing the numbers is the point: this is a service adjustment made
-        once per television, and it is worthless if it cannot be written back
-        into config.py afterwards.
+        The numbers are printed as well as saved: the save keeps THIS cabinet
+        tuned, and the printed line is what you paste into config.py to give a
+        second cabinet the same starting point, or to bake it into an image.
         """
         self.offset_x += dx
         self.offset_y += dy
@@ -512,16 +516,20 @@ class UI:
 
     def zoom_image(self, delta: float) -> None:
         """Grow or shrink the picture, for a tube that overscans."""
-        self.scale = max(0.5, min(1.0, round(self.scale + delta, 3)))
+        self.scale = max(
+            config.IMAGE_SCALE_MIN,
+            min(config.IMAGE_SCALE_MAX, round(self.scale + delta, 3)),
+        )
         self._report_geometry()
 
     def _report_geometry(self) -> None:
         """Say where the picture ended up, in a form that can be pasted into
-        config.py. A service adjustment you cannot write down is worthless."""
+        config.py. The value is saved to state/display.json on exit either way;
+        this line is for carrying a good setting to another machine."""
         self._rebuild_target()
         print(
             f"[ui] picture: offset ({self.offset_x}, {self.offset_y}) "
-            f"scale {self.scale:.2f}  ->  config.py:  "
+            f"scale {self.scale:.2f}  (saved on exit)  ->  config.py:  "
             f"IMAGE_OFFSET_X = {self.offset_x}  "
             f"IMAGE_OFFSET_Y = {self.offset_y}  "
             f"IMAGE_SCALE = {self.scale:.2f}",
@@ -568,7 +576,29 @@ class UI:
         self.screen = self._make_screen(self.fullscreen)  # rebuilds .display too
 
     def quit(self) -> None:
+        self.save_geometry()
         pygame.quit()
+
+    def save_geometry(self) -> None:
+        """Persist the picture geometry, if it actually moved this run.
+
+        Called from the shutdown path, so it is careful about two things: it
+        never writes a file identical to the one already there -- a cabinet
+        whose card is failing should not take a write for a session where
+        nobody touched the arrow keys -- and it never raises, because a display
+        setting must not turn a clean exit into a traceback.
+        """
+        current = display_state.Geometry(
+            offset_x=self.offset_x, offset_y=self.offset_y, scale=self.scale
+        )
+        if current == self._saved_geometry:
+            return
+        if display_state.save(current):
+            self._saved_geometry = current
+            print(
+                f"[display] saved picture geometry: offset "
+                f"({current.offset_x}, {current.offset_y}) scale {current.scale:.2f}"
+            )
 
     # -- the animation switch ---------------------------------------------
     # Every duration and every cyclic effect goes through one of these, so

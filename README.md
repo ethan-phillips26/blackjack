@@ -18,6 +18,7 @@ config.py            EVERY constant: pins, keys, timings, rules, safe area
 game.py              blackjack rules engine        (pure)
 cards.py             card + shoe model             (pure)
 bank.py              quarter balance, atomic persistence, payout FSM (pure)
+display_state.py     remembers the picture geometry per television  (pure)
 ui.py                pygame rendering + animation + keyboard (only pygame import)
 anim.py              easing curves, tweens, timing helpers   (pure)
 audio.py             procedurally synthesised sound effects  (pure)
@@ -30,7 +31,7 @@ tests/               unittest suite, no third-party deps
 blackjack.service    systemd unit
 ```
 
-`game.py`, `cards.py`, `bank.py`, `anim.py` and `audio.py` import **nothing but the standard library
+`game.py`, `cards.py`, `bank.py`, `anim.py`, `audio.py` and `display_state.py` import **nothing but the standard library
 and `config.py`**. They run — and are tested — on a machine with neither pygame
 nor gpiozero installed. `ui.py` is the only file that imports pygame; `real.py`
 is the only file that imports gpiozero, and it does so *inside* a method so
@@ -120,6 +121,11 @@ money if it is wrong — a two-card 21 after a split paying 1:1 rather than 3:2.
 that start at 0 and land on 1, delayed and zero-length tweens, shake decay, and
 a credit meter that always settles on exactly the number the bank holds. No
 pygame involved, so it runs with the same bare Python as the rest.
+
+`tests/test_display_state.py` covers the picture-geometry file: config staying
+the default, the round trip, and — most of it — every way a hand-edited
+`state/display.json` could otherwise stop the cabinet booting, from corrupt
+JSON to a `NaN` scale to `true` where a coordinate belongs.
 
 `tests/test_bank.py` covers atomic persistence, cash-out transfer, open- and
 closed-loop dispensing, jams, and crash reconciliation. The headline test is
@@ -420,11 +426,40 @@ and size — and you tune both live, with the game running:
 | arrows | position | `IMAGE_OFFSET_X` / `IMAGE_OFFSET_Y` |
 | `-` and `=` | size (underscan) | `IMAGE_SCALE` |
 
-Every press prints a line you can paste straight into `config.py`:
+**The machine remembers where you left it.** On a clean exit the geometry is
+written to `state/display.json`, and the next launch picks it up — so a
+television gets tuned once, not once per session.
+
+Every press also prints a line you can paste into `config.py`:
 
 ```
-[ui] picture: offset (-6, 0) scale 0.94  ->  config.py:  IMAGE_OFFSET_X = -6  IMAGE_OFFSET_Y = 0  IMAGE_SCALE = 0.94
+[ui] picture: offset (-6, 0) scale 0.94  (saved on exit)  ->  config.py:  IMAGE_OFFSET_X = -6  IMAGE_OFFSET_Y = 0  IMAGE_SCALE = 0.94
 ```
+
+Pasting is now optional — it is for carrying a good setting to a *second*
+cabinet, or baking it into an SD image, rather than for keeping this one.
+
+How the two interact:
+
+| | |
+| --- | --- |
+| `config.py` | the defaults, and the documented source of truth |
+| `state/display.json` | what this particular television was last tuned to; overrides the defaults |
+| **to reset** | delete `state/display.json` |
+
+The file is written **only on a clean exit**, and only when the geometry
+actually changed during that run — a session where nobody touched the keys
+costs no write at all. That is the same bargain `PERSIST_MODE = "memory"`
+makes for the balance, and for the same reason: this cabinet's card is tired
+and a display tweak is not worth spending it on. There is no fsync either. If
+the plug is pulled you lose the tweak, which costs one keypress; `bank.py`
+remains the only thing in the project that has earned the right to block a
+shutdown on storage.
+
+Anything unreadable, corrupt, or hand-mangled in that file is ignored in favour
+of the `config.py` defaults, and absurd values are clamped (`IMAGE_SCALE_MIN` /
+`IMAGE_SCALE_MAX`, offsets to half the screen). A cabinet has to boot, and a
+picture pushed off the tube is indistinguishable from one that did not.
 
 **If content is falling off both edges**, that is overscan and the fix is
 `IMAGE_SCALE`, not the offset: shrink until the whole picture is inside what
@@ -820,6 +855,16 @@ the safe options are:
 
 - **Best: an optocoupler** (PC817 + ~1 kΩ on the LED side). Full galvanic
   isolation, which also keeps the solenoid's electrical noise out of the Pi.
+
+  **Do not connect 3.3 V to the collector side.** The internal pull-up that
+  `pull_up=True` switches on (~50 kΩ) is the *only* pull-up this needs. Wiring
+  the 3.3 V rail straight to the collector pins the line permanently high — the
+  opto then tries to drag the rail itself down through its transistor, the rail
+  wins, and the pin never crosses a logic threshold. No edge is ever produced,
+  the acceptor looks perfectly healthy, and the transistor is shorted across
+  3.3 V for the length of every pulse. If you ever do want to stiffen the line
+  against a long cable run, it must be a **resistor** of 4.7–10 kΩ from GPIO 17
+  to 3.3 V, alongside the internal pull-up — never a bare wire to the rail.
 - **Acceptable: pull up to 3.3 V.** Because the output only ever *sinks*
   current, wire COIN to GPIO 17 with a 10 kΩ pull-up to the Pi's **3.3 V** rail
   and nothing to 12 V. Verify with a meter that the line idles at 3.3 V and not
@@ -878,6 +923,60 @@ If nothing arrives, three checks in order:
    If the pulse landed on a different GPIO, this finds it. The solenoid pin is
    excluded on purpose: claiming it as an input floats the MOSFET gate, which
    can switch the coil on and hold it there.
+
+Work the chain from the Pi end backwards — each step proves everything to its
+right, so never move on until the current one passes.
+
+**1. Short BCM 17 to any GND pin with a jumper.** The tool must print a pulse.
+This is the same falling edge a coin makes, minus the entire coin path. If it
+stays silent the fault is the pin, the pin factory, or another process still
+holding GPIO 17 — the acceptor is irrelevant until this prints.
+
+**1b. Light the optocoupler's LED from the Pi's own 3.3 V.** This tests the
+opto end to end with the acceptor and the 12 V supply entirely out of the
+circuit, so a pass here narrows the fault to one side of one component. Leave
+collector → GPIO 17 and emitter → Pi GND as they are, disconnect the LED side
+from the acceptor, and instead touch:
+
+```
+Pi 3.3 V ──[1 kΩ]── anode (pin 1)
+Pi GND ─────────────cathode (pin 2)
+```
+
+That is about 2 mA through the LED — ample, since the Pi's internal pull-up
+only needs tens of microamps to be dragged down. A pulse means the opto and the
+whole output side are good and the fault is upstream of the LED. Silence means
+the opto itself is in backwards, dead, or not making contact in the breadboard.
+
+Nothing here goes near 12 V, so it is also the safe test to run first if you are
+unsure whether the 12 V side is correctly isolated.
+
+**2. Short the acceptor's COIN wire to the 12 V supply ground.** That is exactly
+what the acceptor's output transistor does on a coin: the output is
+open-collector and only ever pulls down to its own ground, which is also why
+shorting it is safe. A pulse here proves the optocoupler and the Pi side are
+both correct, and points the finger at the acceptor's output mode — check the
+NO/NC switch, and check you are on the COIN wire and not the counter output.
+
+**3. If step 2 is silent, the optocoupler's LED side is wrong.** Almost always
+in the same way: wired for a *source* when the CH-926 *sinks*. A PC817 needs
+current flowing through its LED —
+
+```
++12 V ──[1 kΩ]── anode (pin 1)
+                 cathode (pin 2) ── COIN wire
+GPIO 17 ───────── collector (pin 4)
+Pi GND ────────── emitter (pin 3)
+```
+
+The acceptor pulses by pulling COIN down to 12 V ground, completing that loop.
+Wire COIN to the **anode** with the cathode to ground instead, and the LED can
+only light when COIN drives high — which an open-collector output never does.
+The acceptor accepts coins happily and the Pi sees nothing, permanently. The
+1 kΩ belongs on the 12 V side; without it the LED sits across 12 V and dies.
+
+Emitter and collector swapped is the other one to check: the line then idles in
+the wrong state, which `RESTING: low` at startup will have already told you.
 
 Also confirm the game is really on the GPIO backend. Started by hand,
 `main.py` auto-detects and **falls back to mock** if gpiozero cannot load — the
