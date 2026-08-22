@@ -152,6 +152,68 @@ MAX_BET_QUARTERS = 4
 
 DEALER_HITS_SOFT_17 = False  # False = dealer stands on ALL 17s (spec default)
 
+# --------------------------------------------------------------------------
+# Double down
+# --------------------------------------------------------------------------
+#
+# Doubling adds a SECOND WAGER equal to the first, takes exactly one more card,
+# and then the hand is over. The extra wager is debited from the credit meter
+# the moment the player presses DOUBLE, exactly like the opening bet.
+#
+# MAX_BET_QUARTERS is a ceiling on the OPENING BET, not on the total a hand can
+# have riding on it: doubling a 4-quarter bet puts 8 quarters on that hand, and
+# splitting a 4-quarter bet puts 4 on each of two hands. That is the normal
+# reading at a real table, and it is what keeps the BET button's 1-4 cycle
+# meaningful. If you ever want a per-HAND ceiling instead, clamp it in
+# game.BlackjackGame.can_double() -- one place, not scattered.
+ALLOW_DOUBLE = True
+
+# True  = double on any two cards (liberal, and what most players expect).
+# False = only when the two-card total is in DOUBLE_ALLOWED_TOTALS.
+DOUBLE_ANY_TWO_CARDS = True
+DOUBLE_ALLOWED_TOTALS = (9, 10, 11)
+
+# Double after a split (DAS). Player-favorable; on by default.
+DOUBLE_AFTER_SPLIT = True
+
+# --------------------------------------------------------------------------
+# Split
+# --------------------------------------------------------------------------
+#
+# Splitting a pair puts a SECOND WAGER equal to the first on a second hand.
+# The hands are then played one at a time, left to right, and settled
+# independently against the same dealer hand.
+#
+# Total hands the player may end up with. 2 = one split, no re-splitting.
+# The credit meter has to cover one extra wager per split at the moment it
+# happens, so a 4-quarter bet split to 4 hands needs 16 quarters in total.
+#
+# The 640x480 layout is tuned for TWO hands side by side, each with room for
+# its cards. Three or four still work -- the renderer shares the width out and
+# fans each hand's cards so only the corner index shows -- but on a composite
+# CRT across a room, four fanned hands are a lot harder to read than two.
+MAX_SPLIT_HANDS = 2
+ALLOW_SPLIT = True
+
+# What counts as a pair.
+#   False = same VALUE, so K-10 and Q-J are splittable (the usual house rule).
+#   True  = same RANK, so only K-K, 10-10, and so on.
+SPLIT_REQUIRES_SAME_RANK = False
+
+# Split aces get ONE card each and are then closed out -- the standard rule,
+# and the reason two aces are not simply a licence to draw to two soft hands.
+# Turning this on makes split aces play like any other split hand.
+HIT_SPLIT_ACES = False
+
+# Whether a split hand that draws another ace may be split again. Off by
+# default, and with HIT_SPLIT_ACES off it cannot arise anyway (an ace hand is
+# already closed by the time a second ace lands on it).
+RESPLIT_ACES = False
+
+# A split hand that reaches 21 on two cards is TWENTY-ONE, not a natural: it
+# pays 1:1, not 3:2. This is not a policy flag because no house plays it the
+# other way -- it is enforced in game.Hand.is_natural.
+
 BLACKJACK_PAYOUT_NUMERATOR = 3  # 3:2
 BLACKJACK_PAYOUT_DENOMINATOR = 2
 
@@ -166,8 +228,9 @@ BLACKJACK_PAYOUT_DENOMINATOR = 2
 # this constant, not the arithmetic.
 BLACKJACK_ROUNDING = "down"
 
-# EXTENSION POINT: double / split / insurance / surrender flags land here.
-# Keep them off; the rules engine has TODO markers where they hook in.
+# EXTENSION POINT: insurance / surrender flags land here. Both need a decision
+# point between the deal and the player's turn; see the note at the foot of
+# game.py.
 
 # --------------------------------------------------------------------------
 # Coin acceptor (CH-926 or similar pulse-output unit)
@@ -252,6 +315,8 @@ PIN_BTN_DEAL = 6
 PIN_BTN_HIT = 13
 PIN_BTN_STAND = 19
 PIN_BTN_CASHOUT = 26
+PIN_BTN_DOUBLE = 20
+PIN_BTN_SPLIT = 21
 
 BUTTON_DEBOUNCE_MS = 30
 BUTTON_PULL_UP = True  # wire buttons between the pin and GND
@@ -267,14 +332,30 @@ BTN_DEAL = "DEAL"
 BTN_HIT = "HIT"
 BTN_STAND = "STAND"
 BTN_CASHOUT = "CASHOUT"
+# DOUBLE and SPLIT are only ever legal on the first two cards of a hand, so a
+# cabinet that is short of panel space can leave these two unwired: the game
+# plays perfectly without them, it just never offers those moves. The on-screen
+# hint line only lists a move when it is actually available.
+BTN_DOUBLE = "DOUBLE"
+BTN_SPLIT = "SPLIT"
 
-ALL_BUTTONS = (BTN_BET, BTN_DEAL, BTN_HIT, BTN_STAND, BTN_CASHOUT)
+ALL_BUTTONS = (
+    BTN_BET,
+    BTN_DEAL,
+    BTN_HIT,
+    BTN_STAND,
+    BTN_DOUBLE,
+    BTN_SPLIT,
+    BTN_CASHOUT,
+)
 
 BUTTON_PINS = {
     BTN_BET: PIN_BTN_BET,
     BTN_DEAL: PIN_BTN_DEAL,
     BTN_HIT: PIN_BTN_HIT,
     BTN_STAND: PIN_BTN_STAND,
+    BTN_DOUBLE: PIN_BTN_DOUBLE,
+    BTN_SPLIT: PIN_BTN_SPLIT,
     BTN_CASHOUT: PIN_BTN_CASHOUT,
 }
 
@@ -285,13 +366,17 @@ KEY_BINDINGS = {
     "return": BTN_DEAL,
     "h": BTN_HIT,
     "s": BTN_STAND,
+    "d": BTN_DOUBLE,
+    "p": BTN_SPLIT,
     "c": BTN_CASHOUT,
 }
 
 # PC-only test keys. Ignored by the real backend; these are how you exercise
 # the acceptor and dispenser logic with nothing wired up.
 KEY_TEST_INSERT_COIN = "q"  # simulate one quarter accepted
-KEY_TEST_COIN_DROP = "d"  # simulate the IR beam seeing a coin fall
+# 'i' for the IR beam. It was 'd' until DOUBLE needed that key -- a blackjack
+# machine where 'd' is not double is the more surprising of the two.
+KEY_TEST_COIN_DROP = "i"  # simulate the IR beam seeing a coin fall
 KEY_TEST_JAM_TOGGLE = "j"  # stop auto-confirming drops -> force a jam
 KEY_TOGGLE_FULLSCREEN = "f11"
 KEY_TOGGLE_SAFE_GUIDE = "g"
@@ -362,7 +447,8 @@ ATTRACT_PIP_COUNT = 14  # drifting suit pips in the background
 ATTRACT_PIP_PERIOD_MS = 9000  # time for one pip to cross the screen
 ATTRACT_MARQUEE_TEXT = (
     "BLACKJACK PAYS 3 TO 2   -   DEALER STANDS ON ALL 17   -   "
-    "BET 1 TO 4 QUARTERS   -   HIT OR STAND   -   CASH OUT ANY TIME   -   "
+    "BET 1 TO 4 QUARTERS   -   HIT   STAND   DOUBLE   SPLIT   -   "
+    "CASH OUT ANY TIME   -   "
 )
 
 # --------------------------------------------------------------------------

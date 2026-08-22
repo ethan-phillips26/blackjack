@@ -13,6 +13,7 @@ import config
 from cards import Card, Shoe
 from game import (
     BlackjackGame,
+    Hand,
     Outcome,
     Phase,
     blackjack_bonus_quarters,
@@ -345,6 +346,314 @@ class TestBetting(unittest.TestCase):
         game.bet_quarters = 3
         self.assertFalse(game.can_deal(2))
         self.assertTrue(game.can_deal(3))
+
+
+
+class TestDouble(unittest.TestCase):
+    """Double down: a second wager, exactly one card, hand over."""
+
+    def make_game(self, *cards: str) -> BlackjackGame:
+        game = BlackjackGame(shoe=Shoe(num_decks=1, seed=7))
+        game.shoe.stack(hand(*cards))
+        return game
+
+    def play_out_dealer(self, game: BlackjackGame) -> None:
+        while game.phase is Phase.DEALER_TURN:
+            game.dealer_step()
+
+    def test_double_takes_one_card_and_ends_the_hand(self):
+        game = self.make_game("6S", "9C", "5H", "7D", "10S")
+        game.bet_quarters = 2
+        game.deal()  # player 6+5 = 11, dealer shows 9
+        self.assertTrue(game.can_double(balance_quarters=2))
+        self.assertEqual(game.double_cost(), 2)
+
+        self.assertTrue(game.double())
+        self.assertEqual(len(game.player_cards), 3)  # exactly one more card
+        self.assertIs(game.phase, Phase.DEALER_TURN)
+        self.assertFalse(game.dealer_hole_hidden)
+
+    def test_doubling_doubles_the_wager_and_the_win(self):
+        game = self.make_game("6S", "9C", "5H", "8D", "10S")
+        game.bet_quarters = 2
+        game.deal()
+        game.double()  # 6 + 5 + 10 = 21 against the dealer's 17
+        self.play_out_dealer(game)
+
+        result = game.result
+        self.assertIs(result.outcome, Outcome.PLAYER_WIN)
+        self.assertEqual(result.bet_quarters, 4)  # 2 + the second wager
+        self.assertEqual(result.returned_quarters, 8)  # 1:1 on 4 quarters
+        self.assertEqual(result.net_quarters, 4)
+        self.assertTrue(result.hands[0].doubled)
+
+    def test_doubling_into_a_loss_costs_both_wagers(self):
+        game = self.make_game("6S", "10C", "5H", "9D", "2S")
+        game.bet_quarters = 3
+        game.deal()
+        game.double()  # 6+5+2 = 13 against the dealer's 19
+        self.play_out_dealer(game)
+        self.assertEqual(game.result.bet_quarters, 6)
+        self.assertEqual(game.result.returned_quarters, 0)
+        self.assertEqual(game.result.net_quarters, -6)
+
+    def test_doubling_into_a_bust_settles_without_the_dealer_drawing(self):
+        game = self.make_game("10S", "6C", "6H", "5D", "9S")
+        game.deal()
+        game.double()  # 10+6+9 = 25
+        self.assertIs(game.phase, Phase.SETTLED)
+        self.assertIs(game.result.outcome, Outcome.PLAYER_BUST)
+        self.assertEqual(len(game.dealer_cards), 2)  # dealer never drew
+
+    def test_cannot_double_after_hitting(self):
+        game = self.make_game("5S", "9C", "4H", "7D", "3S")
+        game.deal()
+        game.hit()
+        self.assertFalse(game.can_double(balance_quarters=99))
+        self.assertFalse(game.double())
+        self.assertEqual(len(game.player_cards), 3)  # nothing was drawn
+
+    def test_cannot_double_without_the_credits(self):
+        game = self.make_game("6S", "9C", "5H", "7D", "10S")
+        game.bet_quarters = 3
+        game.deal()
+        self.assertFalse(game.can_double(balance_quarters=2))
+        self.assertTrue(game.can_double(balance_quarters=3))
+
+    def test_double_can_be_switched_off(self):
+        game = self.make_game("6S", "9C", "5H", "7D", "10S")
+        game.deal()
+        with mock.patch.object(config, "ALLOW_DOUBLE", False):
+            self.assertFalse(game.can_double(balance_quarters=99))
+
+    def test_restricted_doubling_only_on_the_allowed_totals(self):
+        with mock.patch.object(config, "DOUBLE_ANY_TWO_CARDS", False), \
+                mock.patch.object(config, "DOUBLE_ALLOWED_TOTALS", (9, 10, 11)):
+            game = self.make_game("6S", "9C", "5H", "7D", "10S")
+            game.deal()  # 11
+            self.assertTrue(game.can_double(balance_quarters=99))
+
+            game = self.make_game("6S", "9C", "2H", "7D", "10S")
+            game.deal()  # 8
+            self.assertFalse(game.can_double(balance_quarters=99))
+
+    def test_double_is_ignored_outside_the_player_turn(self):
+        game = self.make_game("6S", "9C", "5H", "7D", "10S")
+        self.assertFalse(game.can_double(balance_quarters=99))
+        self.assertFalse(game.double())  # still BETTING
+        game.deal()
+        game.stand()
+        self.assertFalse(game.double())  # dealer's turn
+
+
+class TestSplit(unittest.TestCase):
+    """Split: two hands, two wagers, settled independently."""
+
+    def make_game(self, *cards: str) -> BlackjackGame:
+        game = BlackjackGame(shoe=Shoe(num_decks=1, seed=7))
+        game.shoe.stack(hand(*cards))
+        return game
+
+    def play_out_dealer(self, game: BlackjackGame) -> None:
+        while game.phase is Phase.DEALER_TURN:
+            game.dealer_step()
+
+    def test_split_makes_two_hands_with_matching_wagers(self):
+        game = self.make_game("8S", "5C", "8H", "6D", "3D", "2C")
+        game.bet_quarters = 2
+        game.deal()
+        self.assertTrue(game.can_split(balance_quarters=2))
+        self.assertEqual(game.split_cost(), 2)
+
+        self.assertTrue(game.split())
+        self.assertEqual(len(game.hands), 2)
+        self.assertEqual([h.bet_quarters for h in game.hands], [2, 2])
+        self.assertEqual(game.wagered_quarters, 4)
+        # The first hand is dealt its second card at once; the second waits.
+        self.assertEqual(len(game.hands[0].cards), 2)
+        self.assertEqual(len(game.hands[1].cards), 1)
+        self.assertEqual(game.active_index, 0)
+        self.assertEqual(game.split_serial, 1)
+
+    def test_the_second_hand_is_dealt_when_the_player_reaches_it(self):
+        game = self.make_game("8S", "5C", "8H", "6D", "3D", "2C")
+        game.deal()
+        game.split()
+        game.stand()  # done with hand one
+        self.assertIs(game.phase, Phase.PLAYER_TURN)
+        self.assertEqual(game.active_index, 1)
+        self.assertEqual(len(game.hands[1].cards), 2)
+        self.assertEqual(game.hands[1].total, 10)  # 8 + 2
+
+    def test_hands_are_settled_independently(self):
+        # Hand one draws to 20 and wins; hand two busts.
+        game = self.make_game("8S", "9C", "8H", "8D", "10D", "9C", "5S")
+        game.bet_quarters = 1
+        game.deal()  # player 8/8, dealer 9 + 8 = 17 -> stands
+        game.split()
+        game.stand()  # hand one: 8 + 10 = 18
+        game.hit()  # hand two: 8 + 9 = 17, + 5 = 22 -> bust, hand over
+        self.play_out_dealer(game)
+
+        result = game.result
+        self.assertEqual(len(result.hands), 2)
+        self.assertIs(result.hands[0].outcome, Outcome.PLAYER_WIN)
+        self.assertIs(result.hands[1].outcome, Outcome.PLAYER_BUST)
+        self.assertEqual(result.hands[0].returned_quarters, 2)
+        self.assertEqual(result.hands[1].returned_quarters, 0)
+        # Two wagers out, one paid at 1:1: the round nets exactly zero.
+        self.assertEqual(result.bet_quarters, 2)
+        self.assertEqual(result.returned_quarters, 2)
+        self.assertEqual(result.net_quarters, 0)
+        self.assertIs(result.outcome, Outcome.PUSH)  # net-zero round
+
+    def test_twentyone_after_a_split_is_not_a_natural(self):
+        # A ten on a split ace is 21, and pays 1:1 -- not 3:2.
+        game = self.make_game("AS", "9C", "AH", "8D", "KD", "QC")
+        game.bet_quarters = 2
+        game.deal()
+        game.split()
+        self.play_out_dealer(game)
+
+        result = game.result
+        for hand_result in result.hands:
+            self.assertEqual(hand_total(hand_result.cards), 21)
+            self.assertIs(hand_result.outcome, Outcome.PLAYER_WIN)
+            self.assertNotIn(hand_result.outcome, (Outcome.PLAYER_BLACKJACK,))
+            self.assertEqual(hand_result.returned_quarters, 4)  # 1:1, not 3:2
+        self.assertEqual(result.net_quarters, 4)
+
+    def test_split_aces_get_exactly_one_card_each(self):
+        game = self.make_game("AS", "9C", "AH", "8D", "3D", "4C", "5S")
+        game.deal()
+        game.split()
+        # Both hands are closed out by the one-card rule, so the split alone
+        # hands the round straight to the dealer.
+        self.assertIs(game.phase, Phase.DEALER_TURN)
+        self.assertEqual([len(h.cards) for h in game.hands], [2, 2])
+        self.assertTrue(all(h.finished for h in game.hands))
+
+    def test_split_aces_may_be_played_out_when_configured(self):
+        with mock.patch.object(config, "HIT_SPLIT_ACES", True):
+            game = self.make_game("AS", "9C", "AH", "8D", "3D", "4C", "5S")
+            game.deal()
+            game.split()
+            self.assertIs(game.phase, Phase.PLAYER_TURN)
+            self.assertFalse(game.hands[0].finished)  # A + 3 = soft 14
+
+    def test_pairs_are_by_value_unless_rank_is_required(self):
+        game = self.make_game("KS", "9C", "10H", "8D", "3D", "4C")
+        game.deal()
+        self.assertTrue(game.can_split(balance_quarters=99))
+        with mock.patch.object(config, "SPLIT_REQUIRES_SAME_RANK", True):
+            self.assertFalse(game.can_split(balance_quarters=99))
+
+    def test_cannot_split_a_non_pair(self):
+        game = self.make_game("9S", "9C", "8H", "8D")
+        game.deal()
+        self.assertFalse(game.can_split(balance_quarters=99))
+        self.assertFalse(game.split())
+        self.assertEqual(len(game.hands), 1)
+
+    def test_cannot_split_without_the_credits(self):
+        game = self.make_game("8S", "5C", "8H", "6D", "3D", "2C")
+        game.bet_quarters = 4
+        game.deal()
+        self.assertFalse(game.can_split(balance_quarters=3))
+        self.assertTrue(game.can_split(balance_quarters=4))
+
+    def test_split_can_be_switched_off(self):
+        game = self.make_game("8S", "5C", "8H", "6D")
+        game.deal()
+        with mock.patch.object(config, "ALLOW_SPLIT", False):
+            self.assertFalse(game.can_split(balance_quarters=99))
+
+    def test_resplitting_stops_at_the_configured_hand_limit(self):
+        # Hand one gets another 8, which would be a re-split.
+        game = self.make_game("8S", "9C", "8H", "8D", "8D", "2C")
+        game.deal()
+        game.split()
+        self.assertEqual(len(game.hands), 2)
+        self.assertTrue(game.hands[0].is_pair)
+        self.assertEqual(config.MAX_SPLIT_HANDS, 2)
+        self.assertFalse(game.can_split(balance_quarters=99))
+
+        with mock.patch.object(config, "MAX_SPLIT_HANDS", 4):
+            self.assertTrue(game.can_split(balance_quarters=99))
+            self.assertTrue(game.split())
+            self.assertEqual(len(game.hands), 3)
+            # The new hand is inserted immediately after the one it came from.
+            self.assertEqual(game.active_index, 0)
+            self.assertEqual(game.split_serial, 2)
+
+    def test_doubling_after_a_split(self):
+        game = self.make_game("8S", "9C", "8H", "8D", "3D", "2C", "10S")
+        game.bet_quarters = 1
+        game.deal()
+        game.split()  # hand one: 8 + 3 = 11
+        self.assertTrue(game.can_double(balance_quarters=1))
+        game.double()
+        self.assertEqual(game.hands[0].bet_quarters, 2)
+        self.assertEqual(game.wagered_quarters, 3)  # 2 doubled + 1 on hand two
+
+        with mock.patch.object(config, "DOUBLE_AFTER_SPLIT", False):
+            self.assertFalse(game.can_double(balance_quarters=99))
+
+    def test_every_hand_busting_skips_the_dealer(self):
+        game = self.make_game("8S", "9C", "8H", "8D", "10D", "9S", "10C", "8C")
+        game.deal()
+        game.split()
+        game.hit()  # hand one: 8 + 10 + 9 = 27 -> bust
+        game.hit()  # hand two: 8 + 10 = 18, + 8 = 26 -> bust
+        self.assertIs(game.phase, Phase.SETTLED)
+        self.assertEqual(len(game.dealer_cards), 2)  # dealer never drew
+        self.assertFalse(game.dealer_hole_hidden)
+        self.assertEqual(game.result.returned_quarters, 0)
+
+    def test_a_split_round_is_summarised_by_its_net(self):
+        # One hand wins, one busts: the round is a wash, and the banner has to
+        # say so rather than pick one hand's outcome and call it the round's.
+        game = self.make_game("8S", "9C", "8H", "8D", "10D", "9C", "5S")
+        game.deal()
+        game.split()
+        game.stand()
+        game.hit()  # busts
+        self.play_out_dealer(game)
+        self.assertEqual(game.result.net_quarters, 0)
+        self.assertEqual(game.result.message, "EVEN")
+
+        # ...and a single hand still gets its own words.
+        game = self.make_game("10S", "9C", "9H", "8D", "5S")
+        game.deal()
+        game.hit()
+        self.assertEqual(game.result.message, "BUST")
+
+    def test_clear_forgets_the_split_but_not_the_serial(self):
+        game = self.make_game("8S", "5C", "8H", "6D", "3D", "2C")
+        game.deal()
+        game.split()
+        serial = game.split_serial
+        game.clear()
+        self.assertEqual(game.hands, [])
+        self.assertEqual(game.active_index, 0)
+        self.assertEqual(game.player_cards, [])
+        # The renderer keys off this counter to tell a split from a new deal,
+        # so it must never go backwards.
+        self.assertEqual(game.split_serial, serial)
+
+
+class TestHandHelpers(unittest.TestCase):
+    def test_a_split_hand_can_never_hold_a_natural(self):
+        dealt = Hand(cards=hand("AS", "KH"), bet_quarters=1)
+        self.assertTrue(dealt.is_natural)
+        after_split = Hand(cards=hand("AS", "KH"), bet_quarters=1, from_split=True)
+        self.assertFalse(after_split.is_natural)
+
+    def test_pair_detection(self):
+        self.assertTrue(Hand(cards=hand("8S", "8H")).is_pair)
+        self.assertTrue(Hand(cards=hand("KS", "10H")).is_pair)  # same value
+        self.assertFalse(Hand(cards=hand("9S", "8H")).is_pair)
+        self.assertFalse(Hand(cards=hand("8S", "8H", "2D")).is_pair)
 
 
 class TestNoGuiDependencies(unittest.TestCase):

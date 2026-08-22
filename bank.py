@@ -299,13 +299,20 @@ class Bank:
 
     # -- wagering ----------------------------------------------------------
 
-    def place_bet(self, quarters: int) -> bool:
-        """Debit the wager. False (and no change) if the balance won't cover it."""
+    def place_bet(self, quarters: int, reason: str = "BET") -> bool:
+        """Debit a wager. False (and no change) if the balance won't cover it.
+
+        `reason` only labels the ledger line. Doubling and splitting each place
+        a SECOND wager through this same method, and a ledger that called all
+        three "BET" would make a doubled hand indistinguishable from a player
+        who dealt twice -- which is exactly the question anybody reading the
+        ledger is trying to answer.
+        """
         if quarters <= 0 or quarters > self.state.balance_quarters:
             return False
         self.state.balance_quarters -= quarters
         self.save()
-        self.log("BET", f"-{quarters}")
+        self.log(reason, f"-{quarters}")
         return True
 
     def credit(self, quarters: int, reason: str = "PAYOUT") -> int:

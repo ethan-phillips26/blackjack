@@ -455,6 +455,25 @@ class App:
                 game.stand()
                 self.dealer_next_ms = now + config.DEALER_STEP_MS
 
+        # DOUBLE and SPLIT each commit a SECOND WAGER, so they follow the same
+        # order as DEAL: ask the rules whether the move is legal AND affordable,
+        # debit the meter, and only then let the rules engine move the cards.
+        # The debit is what can fail (and what can block on a slow SD card), so
+        # nothing on the table changes until it has succeeded.
+        elif button == config.BTN_DOUBLE:
+            if game.can_double(self.bank.balance_quarters):
+                if self.bank.place_bet(game.double_cost(), "DOUBLE"):
+                    game.double()
+                    self.dealer_next_ms = now + config.DEALER_STEP_MS
+                    self.play_sound("bet")
+
+        elif button == config.BTN_SPLIT:
+            if game.can_split(self.bank.balance_quarters):
+                if self.bank.place_bet(game.split_cost(), "SPLIT"):
+                    game.split()
+                    self.dealer_next_ms = now + config.DEALER_STEP_MS
+                    self.play_sound("bet")
+
     def on_cash_out(self, now: int) -> None:
         if self.payout.status.jammed:
             self.payout.retry_after_jam(now)  # have another go at the stuck coin

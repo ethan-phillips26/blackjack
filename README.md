@@ -59,6 +59,8 @@ either way with `--mock` / `--real`. Other flags: `--fullscreen`, `--windowed`,
 | `Enter` | DEAL |
 | `H` | HIT |
 | `S` | STAND |
+| `D` | DOUBLE — second wager, one card, hand over |
+| `P` | SPLIT — a pair becomes two hands, each with its own wager |
 | `C` | CASH OUT — dispenses the whole balance (and doubles as jam retry) |
 | `F11` | fullscreen |
 | `G` | draw the overscan-safe-area box |
@@ -74,7 +76,7 @@ either way with `--mock` / `--real`. Other flags: `--fullscreen`, `--windowed`,
 | Key | Simulates |
 | --- | --- |
 | `Q` | inserting a quarter — fed through the real pulse-grouping code |
-| `D` | the IR beam seeing a coin drop |
+| `I` | the IR beam seeing a coin drop |
 | `J` | toggle "coins will drop" — turn it off to force a dispenser jam |
 
 These three are inert on real hardware. `Hardware.simulate_coin_insert()` is a
@@ -108,7 +110,11 @@ money code have no GUI or GPIO dependencies.
 `tests/test_game.py` covers hand values and ace demotion, natural detection
 (including 3-card 21 *not* being a natural), dealer draw logic on hard and soft
 17, every win/lose/push/bust outcome, and the payout table — with the 3:2
-odd-bet rounding checked under all three policies.
+odd-bet rounding checked under all three policies. Double and split get the
+same treatment: the doubled wager and its 1:1 return, doubling into a bust
+without the dealer drawing, split hands settled independently against one
+dealer hand, split aces taking one card each, and — the one that costs real
+money if it is wrong — a two-card 21 after a split paying 1:1 rather than 3:2.
 
 `tests/test_anim.py` covers the animation timing primitives — easing curves
 that start at 0 and land on 1, delayed and zero-length tweens, shake decay, and
@@ -147,6 +153,51 @@ Change `config.BLACKJACK_ROUNDING`; the arithmetic lives in exactly one place,
 
 **Winnings go to the credit meter, not the hopper.** Coins only move when the
 player presses CASH OUT.
+
+### Double and split
+
+Both moves work the same way as far as the money is concerned: they place a
+**second wager equal to the first**, debited from the credit meter the instant
+the button is pressed, exactly like the opening bet. Neither can happen without
+the credits to cover it — `game.can_double()` / `can_split()` are asked before
+the bank is touched, and the hint line under the cards only offers a move the
+player can actually make.
+
+**DOUBLE** — legal on the first two cards of a hand. Doubles that hand's wager,
+draws exactly one card, and ends the hand. `config.ALLOW_DOUBLE` turns it off;
+`DOUBLE_ANY_TWO_CARDS = False` restricts it to the totals in
+`DOUBLE_ALLOWED_TOTALS`; `DOUBLE_AFTER_SPLIT` decides whether it is offered on
+a hand that came out of a split.
+
+**SPLIT** — legal on a two-card pair. The hands are played left to right, each
+getting its second card at the moment the player reaches it, and each is
+settled independently against the same dealer hand. Two house rules are worth
+knowing:
+
+- **A two-card 21 after a split is twenty-one, not a natural.** It pays 1:1,
+  not 3:2. Every house plays it this way, so it is enforced in
+  `game.Hand.is_natural` rather than left to a flag.
+- **Split aces get one card each and are then closed out**, unless you set
+  `config.HIT_SPLIT_ACES`.
+
+`MAX_SPLIT_HANDS` (default 2 — one split, no re-splitting) caps how many hands
+one round can become, and `SPLIT_REQUIRES_SAME_RANK` decides whether K-10 is a
+pair. Note that `MAX_BET_QUARTERS` is a ceiling on the **opening bet**, not on
+what a round can end up holding: a 4-quarter bet, split and then doubled on
+both hands, has 16 quarters riding on it.
+
+**The BET readout shows the whole table.** Once a hand is dealt it reads
+`game.wagered_quarters` — the total across every hand — so a player who has
+doubled sees the money they actually have at stake.
+
+**Split rounds are summarised by their net.** A round can win one hand and lose
+another, so the banner reports the money (`YOU WIN` / `YOU LOSE` / `EVEN`) and
+each hand's own total is coloured green or red above its cards. The gold
+`> 18 <` marks the hand being played.
+
+In the ledger, the extra wagers are logged as `DOUBLE` and `SPLIT` rather than
+`BET`, so a doubled hand can never be mistaken for two separate deals when the
+cash box is reconciled against the log.
 
 ### Crash safety
 
@@ -411,15 +462,15 @@ display.
 
 The keyboard mirror is **always live** — it is `Hardware.inject_button()` on the
 base class, not something the mock backend adds, so `B` / `Enter` / `H` / `S` /
-`C` work on the cabinet exactly as they do on a PC, in parallel with the wired
-arcade buttons. Nothing to enable and no flag to pass:
+`D` / `P` / `C` work on the cabinet exactly as they do on a PC, in parallel with
+the wired arcade buttons. Nothing to enable and no flag to pass:
 
 ```bash
 python3 main.py --real
 ```
 
 A USB keyboard is genuinely useful for servicing a machine, which is why
-pressing HIT from one is allowed. What is *not* allowed is `Q` / `D` / `J`: the
+pressing HIT from one is allowed. What is *not* allowed is `Q` / `I` / `J`: the
 three test keys stay no-ops on real hardware, because a keystroke that mints
 credits or fakes a coin drop is a free-money bug rather than a debug aid. If
 you want those on the Pi — bench-testing the cabinet before any electronics are
@@ -755,6 +806,7 @@ All pins are BCM numbering and all of them live at the top of `config.py`.
 | IR break-beam | GPIO 27 | in, pull-up |
 | Solenoid **driver** | GPIO 18 | out |
 | BET / DEAL / HIT / STAND / CASH OUT | GPIO 5 / 6 / 13 / 19 / 26 | in, pull-up |
+| DOUBLE / SPLIT | GPIO 20 / 21 | in, pull-up |
 
 ### ⚠️ Coin acceptor (CH-926) — 12 V part on a 3.3 V pin
 
@@ -774,10 +826,72 @@ the safe options are:
   12 V before connecting the Pi. A resistor divider is not a substitute if the
   output ever drives high.
 
-Ground the acceptor's 12 V supply to the Pi ground. Set the acceptor to
+Grounding depends on which option you took. With the **pull-up**, the
+acceptor's 12 V supply ground *must* be tied to the Pi ground — otherwise the
+pulse has no return path and the pin sees nothing. With an **optocoupler**, do
+the opposite: keep the two grounds apart. The acceptor side of the opto returns
+to the 12 V supply ground, the Pi side returns to the Pi's, and that separation
+is the isolation you fitted the part for. Tying them together throws it away.
+
+Set the acceptor to
 **1 pulse per coin** (`COIN_PULSES_PER_COIN = 1`); if you program it for more,
 raise that constant and check `COIN_PULSE_GROUP_WINDOW_MS` sits comfortably
 above the acceptor's inter-pulse gap.
+
+### The acceptor takes the coin but no credit appears
+
+The acceptor's LED means it *recognised* the coin. Four links sit between that
+and the credit meter, and any of them drops it silently:
+
+```
+acceptor COIN wire -> optocoupler -> GPIO 17 edge -> gpiozero -> credit
+```
+
+`tools/coin_check.py` walks that chain with the game stopped. It uses the same
+pin, polarity and `PulseAccumulator` as `hardware/real.py`, so whatever it sees
+is what the game would have seen.
+
+```bash
+sudo systemctl stop blackjack     # two processes cannot share the pin
+python3 tools/coin_check.py       # then drop quarters
+```
+
+Read it in this order:
+
+| What it prints | What it means |
+| --- | --- |
+| `RESTING: high` | The opto is idle and the pull-up works. Correct — keep going. |
+| `RESTING: low` | The line is already active at rest, so it can never pulse. Polarity backwards, or the opto conducting continuously. |
+| No edges at all | The pulse never reaches the pin. Wiring, not software. |
+| Edges, no coin | The pulse arrives but does not become a whole coin. |
+
+If nothing arrives, three checks in order:
+
+1. `python3 tools/coin_check.py --invert` — flips the active level without
+   editing `config.py`. Some opto breakout boards buffer the output and hand
+   you an **active-high** pulse. If credits appear with this, set
+   `COIN_PULSE_ACTIVE_LOW = False` and you are done.
+2. `python3 tools/coin_check.py --raw` — drops the debounce and measures the
+   true pulse width. A pulse shorter than `COIN_PULSE_DEBOUNCE_MS` (20 ms) is
+   thrown away before it ever reaches the game.
+3. `python3 tools/coin_check.py --scan` — watches every free input pin at once.
+   If the pulse landed on a different GPIO, this finds it. The solenoid pin is
+   excluded on purpose: claiming it as an input floats the MOSFET gate, which
+   can switch the coil on and hold it there.
+
+Also confirm the game is really on the GPIO backend. Started by hand,
+`main.py` auto-detects and **falls back to mock** if gpiozero cannot load — the
+game plays perfectly from the keyboard and ignores coins forever. The boot line
+says which one you got:
+
+```
+[main] pi hardware (closed-loop dispenser)      <- GPIO
+[main] mock hardware (closed-loop dispenser)    <- no GPIO, coins impossible
+```
+
+`journalctl -u blackjack -n 20` shows it under systemd. The unit passes
+`--real`, which makes a missing gpiozero a hard error instead of a silent
+downgrade — worth using the same flag when you run it by hand.
 
 ### ⚠️ Solenoid — never driven directly
 
@@ -833,6 +947,13 @@ the player, which is why closed loop is the default.
 Wire each arcade button between its pin and **ground**; the internal pull-ups
 are enabled in software. Debounce is handled in `config.BUTTON_DEBOUNCE_MS`.
 
+**DOUBLE and SPLIT are optional on the panel.** Both are only ever legal on the
+first two cards of a hand, so a cabinet short of buttons (or of holes already
+drilled) can leave GPIO 20 and 21 unwired and still play a complete game — the
+moves simply never come up. The on-screen hint line only names a move when it
+is actually available, so nothing advertises a button that isn't there, and a
+USB keyboard can still reach both with `D` and `P` for testing.
+
 ---
 
 ## systemd
@@ -856,11 +977,12 @@ release the pins.
 
 ## Not built (extension points left in place)
 
-- **Double / split / insurance / surrender.** `game.py` ends with a commented
-  block describing exactly where each hooks in. The money functions already
-  work for any bet size, so double needs no accounting changes; split is the
-  one that needs `player_cards` to become a list of hands. Insurance re-opens
-  the odd-quarter rounding question — route it through the same integer path.
+- ~~**Double / split.**~~ Built — see [Double and split](#double-and-split).
+- **Insurance / surrender.** `game.py` ends with a commented block describing
+  where each hooks in: both need a decision point between the deal and the
+  player's turn. Insurance re-opens the odd-quarter rounding question — route
+  it through the same integer path, and note that a half bet of one quarter
+  cannot be paid in coins at all.
 - ~~**Sound.**~~ Built — see [Sound](#sound). Synthesised in `audio.py`, played
   by `ui.py`, and degrading to silence on a machine with no audio device.
 - **Coin acceptor inhibit.** `Hardware.set_coin_acceptor_enabled()` exists and

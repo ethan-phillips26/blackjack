@@ -22,6 +22,17 @@ zero and leaves the same fully playable machine.
 The one place motion touches pacing is main.py's `ui.is_dealing()` check,
 which holds the dealer's next card until the previous one has landed. Money is
 credited the instant the hand settles regardless of what is still moving.
+
+SPLIT HANDS
+-----------
+The felt holds one sprite row per hand: "dealer", then "player0", "player1",
+... one for each of game.hands. Rows are diffed against the cards every frame,
+and a row getting SHORTER normally means a whole new hand was dealt -- so a
+split, which turns one two-card hand into two one-card hands, would look like a
+re-deal and sweep the table. That is what game.split_serial is for: the rules
+engine counts splits, this file watches the count, and _apply_split() rehomes
+the moved card's sprite so it SLIDES across to its new hand instead of being
+dealt again.
 """
 
 from __future__ import annotations
@@ -62,9 +73,28 @@ ATTRACT_INSERT_TOP = 286
 ATTRACT_START_TOP = 336
 ATTRACT_MARQUEE_TOP = 424
 
-# The player is dealt first at a real table, so when several cards appear in
-# one tick the player's outrank the dealer's at the same position.
-DEAL_PRIORITY = {"player": 0, "dealer": 1}
+# Player rows are named "player0", "player1", ... -- one per hand, because a
+# split turns one hand into two and each needs its own row of sprites. The
+# dealer's row is just "dealer". Everything that walks self.rows keys off this
+# prefix rather than hard-coding a hand count.
+PLAYER_ROW = "player"
+DEALER_ROW = "dealer"
+
+#: Gap between two split hands. Deliberately much wider than the 8px between
+#: cards within a hand -- on a composite CRT, five cards in a row with an even
+#: gap read as one hand, and which cards belong to which wager has to be
+#: obvious from across the room.
+HAND_COLUMN_GAP = 44
+
+
+def player_row(index: int) -> str:
+    return f"{PLAYER_ROW}{index}"
+
+
+def deal_priority(name: str) -> int:
+    """The player is dealt first at a real table, so when several cards appear
+    in one tick the player's outrank the dealer's at the same position."""
+    return 1 if name == DEALER_ROW else 0
 
 
 #: name -> Sound, filled by init_audio(). Empty means "running silent", which
@@ -392,7 +422,12 @@ class UI:
         # every frame.
         self._card_cache: dict[Card | None, pygame.Surface] = {}
 
-        self.rows: dict[str, list[CardSprite]] = {"dealer": [], "player": []}
+        self.rows: dict[str, list[CardSprite]] = {DEALER_ROW: [], player_row(0): []}
+        #: Last game.split_serial we reacted to. A hand becoming two cannot be
+        #: inferred from the cards alone -- a row getting SHORTER otherwise
+        #: means a whole new deal -- so the rules engine counts splits and this
+        #: watches the count.
+        self._last_split_serial = 0
         self._discards: list[CardSprite] = []
         #: Earliest time the next card may leave the shoe -- this is the stagger.
         self._deal_clock_ms = 0
@@ -662,7 +697,7 @@ class UI:
             # in front of a player whose money survived a power cut.
             self._credits.snap(bank.balance_quarters)
             self._last_balance = bank.balance_quarters
-            self._last_bet = game.bet_quarters
+            self._last_bet = game.wagered_quarters
             self._last_shuffle_count = game.shoe.shuffle_count
             self._last_owed = bank.owed_quarters
             self._first_update = False
@@ -672,9 +707,12 @@ class UI:
             self._credit_flash_ms = now_ms
             self._last_balance = bank.balance_quarters
 
-        if game.bet_quarters != self._last_bet:
+        # wagered_quarters, not bet_quarters: doubling and splitting put more
+        # money on the table without the BET button being touched, and the
+        # readout has to pop for those too.
+        if game.wagered_quarters != self._last_bet:
             self._bet_bump_ms = now_ms
-            self._last_bet = game.bet_quarters
+            self._last_bet = game.wagered_quarters
 
         if game.shoe.shuffle_count != self._last_shuffle_count:
             self._shuffle_notice_ms = now_ms
@@ -761,16 +799,32 @@ class UI:
             row.append(None)  # the hole card
         return row
 
-    def _sync_cards(self, game: BlackjackGame, now_ms: int) -> None:
-        rows: dict[str, list[Card | None]] = {
-            "player": list(game.player_cards),
-            "dealer": self._dealer_row(game),
-        }
+    def _player_rows(self) -> list[str]:
+        """The player row names currently on the felt, left to right."""
+        names = [n for n in self.rows if n.startswith(PLAYER_ROW)]
+        names.sort(key=lambda n: int(n[len(PLAYER_ROW):]))
+        return names or [player_row(0)]
 
-        if not rows["player"] and not rows["dealer"]:
+    def _sync_cards(self, game: BlackjackGame, now_ms: int) -> None:
+        rows: dict[str, list[Card | None]] = {DEALER_ROW: self._dealer_row(game)}
+        for index, hand in enumerate(game.hands):
+            rows[player_row(index)] = list(hand.cards)
+
+        if not any(rows.values()):
             self._sweep_table(now_ms)
+            self._prune_rows(rows)
             self._deal_clock_ms = 0
             return
+
+        # A split has to be handled BEFORE the generic diff: one hand becoming
+        # two makes a row get shorter, which otherwise means "a new hand was
+        # dealt" and would sweep the table mid-round.
+        if game.split_serial != self._last_split_serial:
+            self._last_split_serial = game.split_serial
+            self._apply_split(game)
+
+        for name in rows:
+            self.rows.setdefault(name, [])
 
         if self._is_a_different_hand(rows):
             # An impatient player can press DEAL on the result screen, which
@@ -780,14 +834,18 @@ class UI:
             self._sweep_table(now_ms)
             self._deal_clock_ms = 0
 
+        self._prune_rows(rows)
+
         # 1. Cards that appeared since the last frame. game.deal() hands us all
         #    four at once; sorting by (position, player-before-dealer) walks
         #    them out of the shoe the way a live dealer would.
         fresh: list[tuple[int, int, str, Card | None]] = []
         for name, cards in rows.items():
             for index in range(len(self.rows[name]), len(cards)):
-                fresh.append((index, DEAL_PRIORITY[name], name, cards[index]))
-        for _index, _priority, name, card in sorted(fresh, key=lambda f: (f[0], f[1])):
+                fresh.append((index, deal_priority(name), name, cards[index]))
+        for _index, _priority, name, card in sorted(
+            fresh, key=lambda f: (f[0], f[1], f[2])
+        ):
             self.rows[name].append(self._deal_sprite(card, now_ms))
 
         # 2. Cards that turned over -- in practice only ever the hole card.
@@ -797,19 +855,67 @@ class UI:
                     sprite.reveal(card, now_ms, self._dur(config.CARD_FLIP_MS))
 
         # 3. A growing hand re-centres, so everything already on the felt
-        #    shuffles sideways to make room.
-        for name, top in (("dealer", ROW_DEALER_CARDS), ("player", ROW_PLAYER_CARDS)):
-            self._layout_row(self.rows[name], top, now_ms)
+        #    shuffles sideways to make room. Split hands share the width, so
+        #    every card on the table moves when a pair is split.
+        self._layout_row(
+            self.rows[DEALER_ROW],
+            ROW_DEALER_CARDS,
+            config.SCREEN_WIDTH / 2,
+            float(config.SAFE_RECT[2]),
+            now_ms,
+        )
+        names = self._player_rows()
+        for name, (centre_x, width) in zip(names, self._player_columns()):
+            self._layout_row(
+                self.rows[name], ROW_PLAYER_CARDS, centre_x, width, now_ms
+            )
+
+    def _prune_rows(self, rows: dict[str, list[Card | None]]) -> None:
+        """Forget player rows the game no longer has -- but only once they are
+        empty, so a swept hand keeps its sprites until they leave the screen."""
+        for name in list(self.rows):
+            if name == DEALER_ROW or name in rows:
+                continue
+            if not self.rows[name]:
+                del self.rows[name]
+        self.rows.setdefault(player_row(0), [])
+
+    def _apply_split(self, game: BlackjackGame) -> None:
+        """Rehome the sprite of the card that just moved to a new hand.
+
+        game.split() takes the second card off the active hand and puts it on a
+        brand-new hand inserted straight after. Mirror exactly that here: shift
+        the later rows along, then move the last sprite of the active row into
+        the gap. The card keeps its identity, so it SLIDES to its new hand
+        instead of being re-dealt out of the shoe.
+
+        If two splits ever land in one frame -- two presses drained from the
+        event queue at once -- only the last is mirrored, and the stray card is
+        simply dealt afresh from the shoe on the next diff. Duller to look at,
+        never wrong: the cards and the money come from the rules engine either
+        way.
+        """
+        active = game.active_index
+        for index in range(len(game.hands) - 1, active + 1, -1):
+            self.rows[player_row(index)] = self.rows.get(player_row(index - 1), [])
+        source = self.rows.get(player_row(active), [])
+        self.rows[player_row(active + 1)] = [source.pop()] if source else []
 
     def _is_a_different_hand(self, rows: dict[str, list[Card | None]]) -> bool:
         """True when what's on screen can no longer be the hand we're given.
 
-        Growth is normal (a hit, the dealer drawing). A row getting SHORTER, a
-        card changing under a sprite, or a face-up card going back down all
-        mean a new hand was dealt without us ever seeing the table empty.
+        Growth is normal (a hit, the dealer drawing, a split that _apply_split
+        has already accounted for). A row getting SHORTER, a card changing
+        under a sprite, a face-up card going back down, or a whole row the game
+        no longer knows about all mean a new hand was dealt without us ever
+        seeing the table empty.
         """
-        for name, cards in rows.items():
-            sprites = self.rows[name]
+        for name, sprites in self.rows.items():
+            cards = rows.get(name)
+            if cards is None:
+                if sprites:
+                    return True
+                continue
             if len(sprites) > len(cards):
                 return True
             for sprite, card in zip(sprites, cards):
@@ -847,18 +953,73 @@ class UI:
         cy = sy + config.CARD_HEIGHT * config.SHOE_SCALE / 2
         return (cx - config.CARD_WIDTH / 2, cy - config.CARD_HEIGHT / 2)
 
-    def _row_positions(self, count: int, top: int) -> list[tuple[float, float]]:
+    @staticmethod
+    def _row_spread(count: int, max_width: float) -> float:
+        """Gap between the left edges of consecutive cards in one hand."""
+        spread = config.CARD_WIDTH + 8
+        if count * spread > max_width:
+            spread = config.CARD_SPACING  # fan them out overlapping instead
+        return float(spread)
+
+    def _row_width(self, count: int, max_width: float) -> float:
+        count = max(1, count)
+        return self._row_spread(count, max_width) * (count - 1) + config.CARD_WIDTH
+
+    def _player_columns(self) -> list[tuple[float, float]]:
+        """(centre_x, width allowance) per player hand, left to right.
+
+        A single hand is centred on the screen and may use the whole safe
+        width -- an ordinary hand is laid out exactly as it always was.
+
+        Split hands share the safe area, but each column is only as wide as its
+        own cards actually need and the GROUP is centred, so two two-card hands
+        sit together in the middle of the felt instead of out at the edges.
+        They drift apart as they are hit, which is also what happens on a real
+        table. The allowance returned alongside is the fixed share of the width
+        that hand may grow into before its cards start overlapping -- fixed, so
+        that drawing one card does not re-space every card in the hand.
+        """
+        names = self._player_rows()
+        _safe_x, _safe_y, safe_w, _safe_h = config.SAFE_RECT
+        if len(names) <= 1:
+            return [(config.SCREEN_WIDTH / 2, float(safe_w))]
+
+        # Three or more hands (config.MAX_SPLIT_HANDS above 2) have to give
+        # some of the gap back, or every column is too narrow to hold two
+        # cards without fanning them.
+        gap = HAND_COLUMN_GAP if len(names) <= 2 else HAND_COLUMN_GAP // 2
+        allowance = (safe_w - gap * (len(names) - 1)) / len(names)
+        widths = [
+            min(allowance, self._row_width(len(self.rows[name]), allowance))
+            for name in names
+        ]
+        left = (config.SCREEN_WIDTH - sum(widths) - gap * (len(names) - 1)) / 2
+        columns: list[tuple[float, float]] = []
+        for width in widths:
+            columns.append((left + width / 2, allowance))
+            left += width + gap
+        return columns
+
+    def _row_positions(
+        self, count: int, top: int, centre_x: float, max_width: float
+    ) -> list[tuple[float, float]]:
         if count <= 0:
             return []
-        spread = config.CARD_WIDTH + 8
-        if count * spread > config.SAFE_RECT[2]:
-            spread = config.CARD_SPACING  # fan them out overlapping instead
+        spread = self._row_spread(count, max_width)
         total = spread * (count - 1) + config.CARD_WIDTH
-        x = (config.SCREEN_WIDTH - total) // 2
+        x = centre_x - total / 2
         return [(x + i * spread, float(top)) for i in range(count)]
 
-    def _layout_row(self, sprites: list[CardSprite], top: int, now_ms: int) -> None:
-        for sprite, dest in zip(sprites, self._row_positions(len(sprites), top)):
+    def _layout_row(
+        self,
+        sprites: list[CardSprite],
+        top: int,
+        centre_x: float,
+        max_width: float,
+        now_ms: int,
+    ) -> None:
+        positions = self._row_positions(len(sprites), top, centre_x, max_width)
+        for sprite, dest in zip(sprites, positions):
             if sprite.dest == dest:
                 continue
             if not sprite.move.started(now_ms):
@@ -870,7 +1031,7 @@ class UI:
 
     def _sweep_table(self, now_ms: int) -> None:
         """Hand over: everything slides off to the discard tray."""
-        for name in ("dealer", "player"):
+        for name in list(self.rows):
             for i, sprite in enumerate(self.rows[name]):
                 x, y = sprite.pos(now_ms)
                 sprite.origin = (x, y)
@@ -1202,7 +1363,7 @@ class UI:
         # --- dealer -----------------------------------------------------
         # Totals count only what has actually been turned over on screen, so
         # they climb card by card as the hand is dealt.
-        shown, hidden = self.revealed("dealer")
+        shown, hidden = self.revealed(DEALER_ROW)
         dealer_label = "DEALER"
         if shown:
             dealer_label = f"DEALER  {hand_value(shown)[0]}{'+' if hidden else ''}"
@@ -1215,27 +1376,16 @@ class UI:
         )
 
         # --- player -----------------------------------------------------
-        shown, hidden = self.revealed("player")
-        player_label = "YOU"
-        if shown:
-            total, is_soft = hand_value(shown)
-            soft = "/soft" if is_soft else ""
-            player_label = f"YOU  {total}{soft}"
-        self._text(
-            player_label,
-            self.font_small,
-            config.COLOR_TEXT_DIM,
-            left=safe_x,
-            top=ROW_PLAYER_LABEL,
-        )
+        self._draw_player_labels(game, safe_x, now)
 
         # --- the cards ---------------------------------------------------
         for sprite in self._discards:
             self._draw_sprite(sprite, now)
-        for sprite in self.rows["dealer"]:
+        for sprite in self.rows[DEALER_ROW]:
             self._draw_sprite(sprite, now)
-        for sprite in self.rows["player"]:
-            self._draw_sprite(sprite, now)
+        for name in self._player_rows():
+            for sprite in self.rows[name]:
+                self._draw_sprite(sprite, now)
 
         # --- banner and prompt ------------------------------------------
         self._draw_banner(game, bank, payout, centre_x, now)
@@ -1262,6 +1412,67 @@ class UI:
         self.last_draw_ms = (time.perf_counter() - self._draw_started) * 1000.0
         self.clock.tick(config.FPS)
 
+    def _draw_player_labels(self, game, safe_x: int, now: int) -> None:
+        """The hand total(s) above the player's cards.
+
+        One hand keeps the plain left-aligned "YOU 18" the layout was tuned
+        around -- an ordinary hand looks exactly as it always did. Split hands
+        get one centred label each, and the hand actually being played is
+        picked out in gold between arrows, because on a composite CRT a subtle
+        highlight is no highlight at all.
+        """
+        names = self._player_rows()
+
+        if len(names) <= 1:
+            shown, _hidden = self.revealed(names[0])
+            label = "YOU"
+            if shown:
+                total, is_soft = hand_value(shown)
+                label = f"YOU  {total}{'/soft' if is_soft else ''}"
+            self._text(
+                label,
+                self.font_small,
+                config.COLOR_TEXT_DIM,
+                left=safe_x,
+                top=ROW_PLAYER_LABEL,
+            )
+            return
+
+        active = game.active_index if game.phase is Phase.PLAYER_TURN else -1
+        results = game.result.hands if game.result is not None else []
+        for index, (name, (centre_x, _width)) in enumerate(
+            zip(names, self._player_columns())
+        ):
+            shown, _hidden = self.revealed(name)
+            text = str(hand_value(shown)[0]) if shown else "--"
+            hand = game.hands[index] if index < len(game.hands) else None
+            if hand is not None and hand.doubled:
+                text += " x2"
+
+            color = config.COLOR_TEXT_DIM
+            if index == active:
+                text = f"> {text} <"
+                color = config.COLOR_ACCENT
+            elif index < len(results):
+                # Settled: colour each hand by what it did. A split round can
+                # be a win and a loss at once, and the single banner cannot say
+                # which was which -- this can.
+                outcome = results[index].outcome
+                if outcome.player_won:
+                    color = config.COLOR_WIN
+                elif not outcome.is_push:
+                    color = config.COLOR_LOSE
+                else:
+                    color = config.COLOR_TEXT
+
+            self._text(
+                text,
+                self.font_small,
+                color,
+                center_x=int(centre_x),
+                top=ROW_PLAYER_LABEL,
+            )
+
     # -- top bar ----------------------------------------------------------
 
     def _draw_credits(self, safe_x: int, safe_y: int, now: int) -> None:
@@ -1280,8 +1491,10 @@ class UI:
     def _draw_bet(self, game, safe_right: int, safe_y: int, now: int) -> None:
         bump = self._fade(self._bet_bump_ms, config.BET_BUMP_MS)
         scale = 1.0 + 0.22 * anim.ease_out_back(bump) * bump
+        # wagered_quarters is the opening bet until the player doubles or
+        # splits, and the true total on the table after they do.
         surface = self.font_large.render(
-            f"BET {game.bet_quarters}", True, config.COLOR_ACCENT
+            f"BET {game.wagered_quarters}", True, config.COLOR_ACCENT
         )
         if bump > 0.0:
             surface = pygame.transform.rotozoom(surface, 0.0, scale)
@@ -1436,7 +1649,15 @@ class UI:
         if payout.is_active:
             return "DISPENSING..."
         if game.phase is Phase.PLAYER_TURN:
-            return "HIT   STAND"
+            # Only ever offer a move the player can actually make: DOUBLE and
+            # SPLIT each need a matching second wager on the meter, and both
+            # vanish the moment the hand has three cards.
+            moves = ["HIT", "STAND"]
+            if game.can_double(bank.balance_quarters):
+                moves.append("DOUBLE")
+            if game.can_split(bank.balance_quarters):
+                moves.append("SPLIT")
+            return "   ".join(moves)
         if game.phase is Phase.BETTING:
             if bank.balance_quarters > 0:
                 return "BET   DEAL   CASH OUT"

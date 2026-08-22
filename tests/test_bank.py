@@ -113,6 +113,20 @@ class TestWagering(BankTestCase):
         self.assertFalse(bank.place_bet(-5))
         self.assertEqual(bank.balance_quarters, 2)
 
+    def test_extra_wagers_are_labelled_in_the_ledger(self):
+        # A doubled hand must not look like two separate deals to whoever is
+        # reconciling the cash box against the ledger.
+        bank = self.make_bank()
+        bank.insert_quarters(6)
+        self.assertTrue(bank.place_bet(2))
+        self.assertTrue(bank.place_bet(2, "DOUBLE"))
+        self.assertTrue(bank.place_bet(2, "SPLIT"))
+        with open(self.ledger_path, encoding="utf-8") as handle:
+            lines = handle.read()
+        self.assertIn("BET", lines)
+        self.assertIn("DOUBLE", lines)
+        self.assertIn("SPLIT", lines)
+
     def test_credit_adds_winnings(self):
         bank = self.make_bank()
         bank.insert_quarters(1)

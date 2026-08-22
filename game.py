@@ -149,13 +149,22 @@ def payout_quarters(outcome: Outcome, bet_quarters: int) -> int:
     return 0
 
 
-def determine_outcome(player: list[Card], dealer: list[Card]) -> Outcome:
+def determine_outcome(
+    player: list[Card], dealer: list[Card], player_natural: bool | None = None
+) -> Outcome:
     """Compare two finished hands. Player bust is checked first: a player who
-    busts loses even if the dealer would also have busted."""
+    busts loses even if the dealer would also have busted.
+
+    `player_natural` overrides the two-card check, and exists for exactly one
+    case: a hand made by SPLITTING that reaches 21 on its two cards is
+    twenty-one, not a natural, and pays 1:1 rather than 3:2. Leave it None and
+    the hand speaks for itself.
+    """
     if is_bust(player):
         return Outcome.PLAYER_BUST
 
-    player_natural = is_blackjack(player)
+    if player_natural is None:
+        player_natural = is_blackjack(player)
     dealer_natural = is_blackjack(dealer)
     if player_natural and dealer_natural:
         return Outcome.PUSH
@@ -189,46 +198,183 @@ class Phase(Enum):
 
 
 @dataclass
-class RoundResult:
+class Hand:
+    """One wager and the cards riding on it.
+
+    A round is a LIST of these. Without splitting the list is always one long,
+    which is why every money property here is per-hand: doubling changes this
+    hand's bet, splitting makes another Hand with its own bet, and settlement
+    compares each Hand against the one dealer hand independently.
+    """
+
+    cards: list[Card] = field(default_factory=list)
+    #: Quarters riding on THIS hand. Doubling doubles it. The player's credit
+    #: meter was debited for every quarter counted here, at the moment it was
+    #: committed -- never retroactively.
+    bet_quarters: int = config.MIN_BET_QUARTERS
+    doubled: bool = False
+    #: True when this hand came out of a split, which is what stops a two-card
+    #: 21 here being paid as a natural.
+    from_split: bool = False
+    #: The player has no more decisions on this hand: stood, doubled, busted,
+    #: hit to 21, or it is a split ace that gets exactly one card.
+    finished: bool = False
+
+    @property
+    def total(self) -> int:
+        return hand_total(self.cards)
+
+    @property
+    def is_soft(self) -> bool:
+        return hand_value(self.cards)[1]
+
+    @property
+    def is_bust(self) -> bool:
+        return is_bust(self.cards)
+
+    @property
+    def is_natural(self) -> bool:
+        """A natural pays 3:2 -- and a split hand can never have one.
+
+        Two cards totalling 21 after a split is TWENTY-ONE and pays 1:1. Every
+        house plays it this way, which is why it is enforced here rather than
+        left to a config flag.
+        """
+        return not self.from_split and is_blackjack(self.cards)
+
+    @property
+    def is_pair(self) -> bool:
+        """Splittable-looking: two cards of the same rank, or -- unless
+        config.SPLIT_REQUIRES_SAME_RANK -- of the same VALUE, so K-10 pairs."""
+        if len(self.cards) != 2:
+            return False
+        first, second = self.cards
+        if config.SPLIT_REQUIRES_SAME_RANK:
+            return first.rank == second.rank
+        return first.base_value == second.base_value
+
+
+@dataclass
+class HandResult:
+    """What one hand did, and what it gets back."""
+
     outcome: Outcome
-    bet_quarters: int
-    returned_quarters: int  # gross back to balance
-    player_cards: list[Card]
-    dealer_cards: list[Card]
+    bet_quarters: int  # total wagered on this hand, doubling included
+    returned_quarters: int  # gross back to the balance
+    cards: list[Card]
+    doubled: bool = False
+    from_split: bool = False
 
     @property
     def net_quarters(self) -> int:
-        """Signed change to the player's balance across the whole hand."""
         return self.returned_quarters - self.bet_quarters
 
     @property
     def message(self) -> str:
-        return {
-            Outcome.PLAYER_BLACKJACK: "BLACKJACK!",
-            Outcome.PLAYER_WIN: "YOU WIN",
-            Outcome.DEALER_BUST: "DEALER BUSTS",
-            Outcome.PUSH: "PUSH",
-            Outcome.PLAYER_BUST: "BUST",
-            Outcome.DEALER_WIN: "DEALER WINS",
-        }[self.outcome]
+        return OUTCOME_MESSAGES[self.outcome]
+
+
+OUTCOME_MESSAGES = {
+    Outcome.PLAYER_BLACKJACK: "BLACKJACK!",
+    Outcome.PLAYER_WIN: "YOU WIN",
+    Outcome.DEALER_BUST: "DEALER BUSTS",
+    Outcome.PUSH: "PUSH",
+    Outcome.PLAYER_BUST: "BUST",
+    Outcome.DEALER_WIN: "DEALER WINS",
+}
+
+
+@dataclass
+class RoundResult:
+    """Everything the round settled to: one HandResult per hand played.
+
+    The aggregate properties (bet_quarters, returned_quarters, net_quarters)
+    are what main.py credits and what the screen shows, and they are plain
+    integer sums -- there is nothing to round at this level, because each
+    hand's 3:2 was already resolved to whole quarters in payout_quarters().
+    """
+
+    hands: list[HandResult]
+    dealer_cards: list[Card] = field(default_factory=list)
+
+    @property
+    def bet_quarters(self) -> int:
+        return sum(h.bet_quarters for h in self.hands)
+
+    @property
+    def returned_quarters(self) -> int:
+        return sum(h.returned_quarters for h in self.hands)
+
+    @property
+    def net_quarters(self) -> int:
+        """Signed change to the player's balance across the whole round."""
+        return self.returned_quarters - self.bet_quarters
+
+    @property
+    def player_cards(self) -> list[Card]:
+        """The first (usually only) hand's cards."""
+        return self.hands[0].cards if self.hands else []
+
+    @property
+    def outcome(self) -> Outcome:
+        """One hand: its own outcome. Split: the round's NET reduced to one.
+
+        A split round can genuinely be a win and a loss at once, so there is no
+        honest single Outcome for it -- the money is what matters, and that is
+        what this reports. The per-hand truth is still in self.hands, which is
+        what the screen draws next to each hand.
+        """
+        if len(self.hands) == 1:
+            return self.hands[0].outcome
+        net = self.net_quarters
+        if net > 0:
+            return Outcome.PLAYER_WIN
+        if net < 0:
+            return Outcome.DEALER_WIN
+        return Outcome.PUSH
+
+    @property
+    def message(self) -> str:
+        if len(self.hands) == 1:
+            return OUTCOME_MESSAGES[self.outcome]
+        # A split round is summarised by the MONEY. "DEALER WINS" over a hand
+        # the player can see they won would read as a bug, so the banner talks
+        # about the round's net and the per-hand truth is shown next to each
+        # hand instead.
+        net = self.net_quarters
+        if net > 0:
+            return "YOU WIN"
+        if net < 0:
+            return "YOU LOSE"
+        return "EVEN"
 
 
 @dataclass
 class BlackjackGame:
-    """One seat at one table. Owns the shoe and the current hand.
+    """One seat at one table. Owns the shoe and the current round.
 
-    Knows nothing about coins, GPIO, or pixels: the caller deducts the bet from
-    the bank before deal() and credits result.returned_quarters after settle.
+    Knows nothing about coins, GPIO, or pixels: the caller deducts every wager
+    from the bank BEFORE the corresponding call here (deal, double, split) and
+    credits result.returned_quarters after settle.
     """
 
     shoe: Shoe = field(default_factory=Shoe)
     phase: Phase = Phase.BETTING
+    #: The bet the BET button sets, i.e. what the NEXT hand starts at. Once a
+    #: hand is dealt the money lives on the Hand objects, because doubling and
+    #: splitting make the hands disagree with each other.
     bet_quarters: int = config.MIN_BET_QUARTERS
-    player_cards: list[Card] = field(default_factory=list)
+    hands: list[Hand] = field(default_factory=list)
+    #: Which hand the player is acting on. Only meaningful in PLAYER_TURN.
+    active_index: int = 0
     dealer_cards: list[Card] = field(default_factory=list)
     result: RoundResult | None = None
     #: While True the dealer's second card is face down.
     dealer_hole_hidden: bool = True
+    #: Bumped on every split, ever -- never reset by clear(). The renderer
+    #: watches it to know that one hand became two, which it cannot infer from
+    #: the cards alone (a row getting SHORTER otherwise means a new deal).
+    split_serial: int = 0
 
     # -- betting -----------------------------------------------------------
 
@@ -254,6 +400,18 @@ class BlackjackGame:
     def can_deal(self, balance_quarters: int) -> bool:
         return self.phase is Phase.BETTING and balance_quarters >= self.bet_quarters
 
+    @property
+    def wagered_quarters(self) -> int:
+        """Everything riding on the table right now, across every hand.
+
+        This is what the BET readout shows mid-hand: after a double or a split
+        the player has more than the opening bet at stake, and a display still
+        insisting on the opening number would be lying about their money.
+        """
+        if not self.hands:
+            return self.bet_quarters
+        return sum(hand.bet_quarters for hand in self.hands)
+
     # -- the hand ----------------------------------------------------------
 
     def deal(self) -> None:
@@ -264,33 +422,178 @@ class BlackjackGame:
         self.shoe.reshuffle_if_needed()  # cut card is honoured between hands only
         self.result = None
         self.dealer_hole_hidden = True
+        self.active_index = 0
         # Dealt alternating, player first, exactly as at a table: player,
         # dealer up-card, player, dealer hole card.
-        self.player_cards = []
+        hand = Hand(bet_quarters=self.bet_quarters)
+        self.hands = [hand]
         self.dealer_cards = []
         for _ in range(2):
-            self.player_cards.append(self.shoe.draw())
+            hand.cards.append(self.shoe.draw())
             self.dealer_cards.append(self.shoe.draw())
         self.phase = Phase.PLAYER_TURN
 
-        # A natural on either side ends the hand immediately -- no player turn.
-        if is_blackjack(self.player_cards) or is_blackjack(self.dealer_cards):
+        # A natural on either side ends the hand immediately -- no player turn,
+        # and so no chance to double or split into a hand that was already over.
+        if hand.is_natural or is_blackjack(self.dealer_cards):
+            hand.finished = True
             self._settle()
 
-    def hit(self) -> None:
+    @property
+    def active_hand(self) -> Hand | None:
         if self.phase is not Phase.PLAYER_TURN:
+            return None
+        if 0 <= self.active_index < len(self.hands):
+            return self.hands[self.active_index]
+        return None
+
+    def hit(self) -> None:
+        hand = self.active_hand
+        if hand is None or hand.finished:
             return
-        self.player_cards.append(self.shoe.draw())
-        if is_bust(self.player_cards):
-            self._settle()  # dealer never draws against a busted player
-        elif hand_total(self.player_cards) == BLACKJACK:
-            self.stand()  # 21: nothing left to decide, don't make them press it
+        self._draw_to(hand)
+        if hand.finished:
+            self._advance()
 
     def stand(self) -> None:
-        if self.phase is not Phase.PLAYER_TURN:
+        hand = self.active_hand
+        if hand is None:
             return
-        self.phase = Phase.DEALER_TURN
+        hand.finished = True
+        self._advance()
+
+    # -- double ------------------------------------------------------------
+
+    def double_cost(self) -> int:
+        """Quarters the player must have on the meter to double right now.
+
+        The second wager always equals the first, so this is simply the active
+        hand's current bet -- and the caller must debit exactly this before
+        calling double().
+        """
+        hand = self.active_hand
+        return hand.bet_quarters if hand is not None else 0
+
+    def can_double(self, balance_quarters: int) -> bool:
+        """Legal AND affordable. main.py asks this before touching the bank."""
+        if not config.ALLOW_DOUBLE:
+            return False
+        hand = self.active_hand
+        if hand is None or hand.finished or len(hand.cards) != 2:
+            return False
+        if hand.from_split and not config.DOUBLE_AFTER_SPLIT:
+            return False
+        if not config.DOUBLE_ANY_TWO_CARDS:
+            if hand.total not in config.DOUBLE_ALLOWED_TOTALS:
+                return False
+        return balance_quarters >= hand.bet_quarters
+
+    def double(self) -> bool:
+        """Second wager, exactly one more card, hand over.
+
+        Returns False and changes nothing if the move is not legal, so a caller
+        that has already debited the bank can put the quarters back. main.py
+        checks can_double() first and never sees this.
+
+        No money math is needed beyond doubling bet_quarters: payout_quarters()
+        works on whatever a hand's bet ended up being, and a doubled hand can
+        never be a natural (it has three cards by the time it settles).
+        """
+        hand = self.active_hand
+        if hand is None or hand.finished or len(hand.cards) != 2:
+            return False
+        hand.bet_quarters *= 2
+        hand.doubled = True
+        self._draw_to(hand)
+        hand.finished = True  # one card only, whatever it was
+        self._advance()
+        return True
+
+    # -- split -------------------------------------------------------------
+
+    def split_cost(self) -> int:
+        """Quarters needed to split: a matching wager on the new hand."""
+        hand = self.active_hand
+        return hand.bet_quarters if hand is not None else 0
+
+    def can_split(self, balance_quarters: int) -> bool:
+        if not config.ALLOW_SPLIT:
+            return False
+        hand = self.active_hand
+        if hand is None or hand.finished or not hand.is_pair:
+            return False
+        if len(self.hands) >= config.MAX_SPLIT_HANDS:
+            return False
+        if hand.cards[0].is_ace and hand.from_split and not config.RESPLIT_ACES:
+            return False
+        return balance_quarters >= hand.bet_quarters
+
+    def split(self) -> bool:
+        """Turn the active hand's pair into two hands, one card each.
+
+        The new hand is inserted immediately AFTER the active one, so the
+        player finishes the left hand before the right one ever gets a second
+        card -- the same order as a live table, and the reason the renderer can
+        follow along with a single "a hand became two" signal.
+
+        Returns False and changes nothing if the move is not legal.
+        """
+        hand = self.active_hand
+        if hand is None or hand.finished or not hand.is_pair:
+            return False
+        if len(self.hands) >= config.MAX_SPLIT_HANDS:
+            return False
+
+        moved = hand.cards.pop()
+        hand.from_split = True
+        sibling = Hand(
+            cards=[moved], bet_quarters=hand.bet_quarters, from_split=True
+        )
+        self.hands.insert(self.active_index + 1, sibling)
+        self.split_serial += 1
+
+        # The hand being played gets its replacement card straight away; the
+        # sibling waits until the player reaches it (see _advance).
+        self._draw_to(hand)
+        if hand.finished:
+            self._advance()
+        return True
+
+    # -- turn plumbing -----------------------------------------------------
+
+    def _draw_to(self, hand: Hand) -> None:
+        """One card onto `hand`, then apply every rule that closes it out."""
+        hand.cards.append(self.shoe.draw())
+
+        if hand.is_bust:
+            hand.finished = True
+        elif hand.from_split and hand.cards[0].is_ace and not config.HIT_SPLIT_ACES:
+            # Split aces get one card each and are done. Without this rule two
+            # aces would be a licence to draw to two soft hands.
+            hand.finished = True
+        elif hand.total == BLACKJACK:
+            hand.finished = True  # nothing left to decide; don't make them press it
+
+    def _advance(self) -> None:
+        """Move to the next hand the player can act on, or end the player turn."""
+        while self.active_index < len(self.hands):
+            hand = self.hands[self.active_index]
+            if len(hand.cards) == 1:
+                # A hand that has been waiting since the split: deal its second
+                # card now, at the moment the player arrives at it.
+                self._draw_to(hand)
+            if not hand.finished:
+                return  # the player is up on this one
+            self.active_index += 1
+
+        # Every hand is closed out.
         self.dealer_hole_hidden = False
+        if all(hand.is_bust for hand in self.hands):
+            # Nothing left to beat -- the dealer never draws against a table
+            # that has already paid the house.
+            self._settle()
+        else:
+            self.phase = Phase.DEALER_TURN
 
     def dealer_step(self) -> bool:
         """Draw at most ONE dealer card. Returns True if the dealer drew.
@@ -307,26 +610,44 @@ class BlackjackGame:
         return False
 
     def _settle(self) -> None:
-        outcome = determine_outcome(self.player_cards, self.dealer_cards)
-        self.result = RoundResult(
-            outcome=outcome,
-            bet_quarters=self.bet_quarters,
-            returned_quarters=payout_quarters(outcome, self.bet_quarters),
-            player_cards=list(self.player_cards),
-            dealer_cards=list(self.dealer_cards),
-        )
+        results = []
+        for hand in self.hands:
+            outcome = determine_outcome(
+                hand.cards, self.dealer_cards, player_natural=hand.is_natural
+            )
+            results.append(
+                HandResult(
+                    outcome=outcome,
+                    bet_quarters=hand.bet_quarters,
+                    returned_quarters=payout_quarters(outcome, hand.bet_quarters),
+                    cards=list(hand.cards),
+                    doubled=hand.doubled,
+                    from_split=hand.from_split,
+                )
+            )
+        self.result = RoundResult(hands=results, dealer_cards=list(self.dealer_cards))
         self.dealer_hole_hidden = False
         self.phase = Phase.SETTLED
 
     def clear(self) -> None:
         """Return to BETTING, leaving the bet where the player set it."""
         self.phase = Phase.BETTING
-        self.player_cards = []
+        self.hands = []
+        self.active_index = 0
         self.dealer_cards = []
         self.result = None
         self.dealer_hole_hidden = True
 
     # -- introspection for the UI -----------------------------------------
+
+    @property
+    def player_cards(self) -> list[Card]:
+        """The active hand's cards -- or the first hand's, once the round is
+        over and nobody is "active" any more."""
+        if not self.hands:
+            return []
+        index = min(self.active_index, len(self.hands) - 1)
+        return self.hands[index].cards
 
     @property
     def player_total(self) -> int:
@@ -335,6 +656,10 @@ class BlackjackGame:
     @property
     def player_is_soft(self) -> bool:
         return hand_value(self.player_cards)[1]
+
+    @property
+    def is_split(self) -> bool:
+        return len(self.hands) > 1
 
     @property
     def dealer_visible_cards(self) -> list[Card]:
@@ -352,22 +677,14 @@ class BlackjackGame:
 # shape of the change is obvious later.
 # ---------------------------------------------------------------------------
 #
-# DOUBLE DOWN
-#   BlackjackGame.double(): assert PLAYER_TURN and len(player_cards) == 2 and
-#   the bank can cover a second bet; debit it, set self.bet_quarters *= 2, draw
-#   exactly one card, then stand(). payout_quarters() already handles any bet
-#   size, so no money changes are needed. Note the doubled bet may exceed
-#   MAX_BET_QUARTERS -- decide whether that ceiling is per-wager or per-hand.
-#
-# SPLIT
-#   The big one: player_cards must become a list[Hand] with an active index,
-#   and settle() must produce one RoundResult per hand. Everything money-side
-#   (payout_quarters, blackjack_bonus_quarters) already works per-hand, so the
-#   change is confined to this file and to ui.py's layout.
-#
 # INSURANCE / SURRENDER
 #   Both need a decision point between deal() and PLAYER_TURN, i.e. a new
 #   Phase.OFFER_INSURANCE that deal() enters when the up-card is an ace.
 #   Insurance pays 2:1 on a half bet -- which re-opens exactly the same
 #   odd-quarter rounding question, so route it through
-#   blackjack_bonus_quarters()-style integer math, never a float.
+#   blackjack_bonus_quarters()-style integer math, never a float. Note that a
+#   half bet of one quarter is not payable at all in coins: the cleanest answer
+#   for this machine is to offer insurance only on even bets.
+#
+# SIX-CARD CHARLIE / other automatic winners
+#   One more clause in _draw_to(), next to the bust and 21 checks.
