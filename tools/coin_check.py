@@ -85,14 +85,50 @@ def load_gpiozero():
     except Exception as exc:  # noqa: BLE001
         sys.exit(f"gpiozero unavailable: {exc}\nThis tool only runs on the Pi.")
 
-    probe = None
-    try:
-        probe = gpiozero.Device._default_pin_factory()  # noqa: SLF001
-        factory = type(probe).__name__
-    except Exception:  # noqa: BLE001
-        factory = "unknown"
-    print(f"gpiozero {gpiozero.__version__}, pin factory: {factory}")
+    print(f"gpiozero {gpiozero_version(gpiozero)}")
     return DigitalInputDevice
+
+
+def gpiozero_version(gpiozero) -> str:
+    """Best-effort version string.
+
+    gpiozero does not expose __version__ in every release -- 2.x dropped it and
+    left the version to package metadata. Neither source is guaranteed, and a
+    diagnostic tool that dies while printing its own banner is worse than
+    useless, so every lookup here is optional.
+    """
+    try:
+        return str(gpiozero.__version__)
+    except AttributeError:
+        pass
+    try:
+        import importlib.metadata
+
+        return importlib.metadata.version("gpiozero")
+    except Exception:  # noqa: BLE001
+        return "version unknown"
+
+
+def describe_factory(device) -> str:
+    """Which pin backend gpiozero actually picked.
+
+    Worth printing: on Bookworm and on the Pi 5 the old RPi.GPIO factory does
+    not work, and the wrong factory fails in ways that look like dead wiring.
+    Read from a live device rather than from Device._default_pin_factory() --
+    the latter is private, is not present in every release, and is not
+    populated until something claims a pin anyway.
+    """
+    for source in (
+        lambda: type(device.pin_factory).__name__,
+        lambda: type(device.pin).__name__,
+    ):
+        try:
+            name = source()
+        except Exception:  # noqa: BLE001
+            continue
+        if name:
+            return name
+    return "unknown"
 
 
 def watch_one(DigitalInputDevice, args: argparse.Namespace) -> None:
@@ -107,6 +143,7 @@ def watch_one(DigitalInputDevice, args: argparse.Namespace) -> None:
 
     device = DigitalInputDevice(args.pin, pull_up=active_low, bounce_time=bounce)
 
+    print(f"pin factory: {describe_factory(device)}")
     print(
         f"\nwatching BCM {args.pin}  "
         f"pull_up={active_low}  "
@@ -202,6 +239,9 @@ def scan(DigitalInputDevice, args: argparse.Namespace) -> None:
             devices[pin] = DigitalInputDevice(pin, pull_up=True)
         except Exception:  # noqa: BLE001 - pin busy or reserved; not interesting
             continue
+
+    if devices:
+        print(f"pin factory: {describe_factory(next(iter(devices.values())))}")
 
     time.sleep(0.2)
     resting = {pin: bool(dev.pin.state) for pin, dev in devices.items()}
