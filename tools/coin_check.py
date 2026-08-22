@@ -198,23 +198,56 @@ def watch_one(DigitalInputDevice, args: argparse.Namespace) -> None:
     device.when_activated = on_active
     device.when_deactivated = on_inactive
 
-    print("\nDrop quarters in now. Ctrl-C to stop.\n")
+    print(
+        "\nDrop quarters in now. Ctrl-C to stop.\n"
+        "SELF-TEST FIRST: touch a jumper wire between BCM "
+        f"{args.pin} and any GND pin.\n"
+        "That must print a pulse. If it does not, the fault is this pin or\n"
+        "this software -- not the acceptor, and no amount of coin-dropping\n"
+        "will tell you anything until it does.\n"
+    )
+
+    # Poll the RAW level alongside the callbacks. The two can disagree, and the
+    # disagreement is the diagnosis: a line that moves while when_activated
+    # stays silent means gpiozero's edge detection is not working (wrong pin
+    # factory), not that the signal is missing. Callbacks alone cannot tell
+    # those apart, and "nothing printed" is the least informative result there
+    # is, so we spend a 1ms poll to never report it falsely.
+    raw_transitions = 0
+    last_raw = raw_high
     deadline = time.monotonic() + args.seconds
     try:
         while time.monotonic() < deadline:
-            time.sleep(0.05)
+            level = bool(device.pin.state)
+            if level != last_raw:
+                raw_transitions += 1
+                last_raw = level
+            time.sleep(0.001)
     except KeyboardInterrupt:
         pass
     finally:
         device.close()
 
+    print(f"\nraw level changed {raw_transitions} time(s) while watching.")
+    if raw_transitions and counts["edges"] == 0:
+        print(
+            "  !! The pin IS moving but no callback fired. That is gpiozero,\n"
+            "     not your wiring -- suspect the pin factory printed above.\n"
+            "     On Bookworm / Pi 5 install lgpio and set\n"
+            "     GPIOZERO_PIN_FACTORY=lgpio."
+        )
+
     print(f"\n{counts['edges']} edge(s), {counts['coins']} whole coin(s).")
     if counts["edges"] == 0:
         print(
-            "No edges at all. The pulse is not arriving on this pin:\n"
+            "No edges at all.\n"
+            "  Did the jumper self-test print a pulse? If NO, stop looking at\n"
+            "  the acceptor: the pin, the factory or this tool is at fault.\n"
+            "  If YES, the tool works and the pulse is not reaching the pin:\n"
             "  * is the acceptor's COIN wire connected, and is the acceptor set\n"
             "    to pulse output rather than a level?\n"
-            "  * does the opto's output share GROUND with the Pi?\n"
+            "  * is the opto's LED side actually being driven? A CH-926 COIN\n"
+            "    line only SINKS -- it needs the LED's other leg on +12V.\n"
             "  * run with --invert, then with --scan."
         )
     elif counts["coins"] == 0:
